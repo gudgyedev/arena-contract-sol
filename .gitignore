@@ -1,0 +1,10 @@
+/target/
+**/target/
+*.ll
+.xray/
+**/*.rs.bk
+.env
+.env.*
+*-keypair.json
+target/deploy/*.json
+target/devnet/**/*.json

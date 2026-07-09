@@ -1,0 +1,19 @@
+[package]
+name = "arena-lock-v2"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+borsh = { workspace = true }
+solana-program = { workspace = true }
+spl-token = { workspace = true }
+spl-token-2022 = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+solana-program-test = { workspace = true }
+solana-sdk = { workspace = true }
+tokio = { workspace = true }
