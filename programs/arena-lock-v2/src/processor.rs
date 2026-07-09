@@ -283,6 +283,41 @@ fn assert_token_account(
     Ok(())
 }
 
+fn assert_config_pda(
+    program_id: &Pubkey,
+    config_account: &AccountInfo,
+    config: &ArenaConfig,
+) -> ProgramResult {
+    let (expected_config, _) = Pubkey::find_program_address(
+        &[
+            CONFIG_SEED,
+            config.authority.as_ref(),
+            &config.config_id.to_le_bytes(),
+        ],
+        program_id,
+    );
+    if expected_config != *config_account.key {
+        return Err(ArenaError::InvalidPda.into());
+    }
+    Ok(())
+}
+
+fn assert_position_pda(
+    program_id: &Pubkey,
+    position_account: &AccountInfo,
+    config: &Pubkey,
+    owner: &Pubkey,
+) -> ProgramResult {
+    let (expected_position, _) = Pubkey::find_program_address(
+        &[POSITION_SEED, config.as_ref(), owner.as_ref()],
+        program_id,
+    );
+    if expected_position != *position_account.key {
+        return Err(ArenaError::InvalidPda.into());
+    }
+    Ok(())
+}
+
 fn accrue_rewards(config: &ArenaConfig, position: &mut ArenaPosition) -> ProgramResult {
     if config.reward_index < position.reward_index_checkpoint {
         return Err(ArenaError::MathOverflow.into());
@@ -451,6 +486,7 @@ fn process_deposit(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) -
     assert_system_program(system_program)?;
 
     let mut arena_config = ArenaConfig::load(&config.data.borrow())?;
+    assert_config_pda(program_id, config, &arena_config)?;
     if amount < arena_config.min_deposit_amount {
         return Err(ArenaError::InvalidAmount.into());
     }
@@ -601,10 +637,12 @@ fn process_activate_position(program_id: &Pubkey, accounts: &[AccountInfo]) -> P
     assert_owned_by(position, program_id)?;
 
     let mut arena_config = ArenaConfig::load(&config.data.borrow())?;
+    assert_config_pda(program_id, config, &arena_config)?;
     let mut arena_position = ArenaPosition::load(&position.data.borrow())?;
     if arena_position.config != *config.key || arena_position.owner != *owner.key {
         return Err(ArenaError::InvalidPda.into());
     }
+    assert_position_pda(program_id, position, config.key, owner.key)?;
     if arena_position.pending_activation_amount == 0 {
         return Err(ArenaError::InvalidAmount.into());
     }
@@ -657,6 +695,7 @@ fn process_fund_rewards(
     assert_supported_token_program(token_program)?;
 
     let mut arena_config = ArenaConfig::load(&config.data.borrow())?;
+    assert_config_pda(program_id, config, &arena_config)?;
     if arena_config.mint != *mint.key
         || arena_config.token_program != *token_program.key
         || arena_config.reward_pool_token_account != *reward_pool_token_account.key
@@ -716,6 +755,7 @@ fn process_roll_epoch(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramR
     assert_owned_by(config, program_id)?;
 
     let mut arena_config = ArenaConfig::load(&config.data.borrow())?;
+    assert_config_pda(program_id, config, &arena_config)?;
     let now = Clock::get()?.unix_timestamp;
     let next_epoch_ts = arena_config
         .last_epoch_ts
@@ -857,6 +897,7 @@ fn process_claim_rewards(program_id: &Pubkey, accounts: &[AccountInfo]) -> Progr
     assert_supported_token_program(token_program)?;
 
     let mut arena_config = ArenaConfig::load(&config.data.borrow())?;
+    assert_config_pda(program_id, config, &arena_config)?;
     if arena_config.mint != *mint.key
         || arena_config.token_program != *token_program.key
         || arena_config.reward_pool_token_account != *reward_pool_token_account.key
@@ -885,6 +926,7 @@ fn process_claim_rewards(program_id: &Pubkey, accounts: &[AccountInfo]) -> Progr
     if arena_position.config != *config.key || arena_position.owner != *owner.key {
         return Err(ArenaError::InvalidPda.into());
     }
+    assert_position_pda(program_id, position, config.key, owner.key)?;
     accrue_rewards(&arena_config, &mut arena_position)?;
     if arena_position.pending_rewards == 0 {
         return Err(ArenaError::NoRewards.into());
@@ -1042,6 +1084,7 @@ fn process_withdraw(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) 
     assert_supported_token_program(token_program)?;
 
     let mut arena_config = ArenaConfig::load(&config.data.borrow())?;
+    assert_config_pda(program_id, config, &arena_config)?;
     if arena_config.mint != *mint.key
         || arena_config.token_program != *token_program.key
         || arena_config.vault_token_account != *vault_token_account.key
@@ -1082,6 +1125,7 @@ fn process_withdraw(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) 
     if arena_position.config != *config.key || arena_position.owner != *owner.key {
         return Err(ArenaError::InvalidPda.into());
     }
+    assert_position_pda(program_id, position, config.key, owner.key)?;
     if amount > arena_position.locked_amount {
         return Err(ArenaError::InsufficientPositionBalance.into());
     }

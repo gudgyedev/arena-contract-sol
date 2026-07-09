@@ -3,6 +3,7 @@
 use solana_program::program_pack::Pack;
 use solana_program_test::{processor, ProgramTest, ProgramTestContext};
 use solana_sdk::{
+    account::{Account, AccountSharedData},
     clock::Clock,
     instruction::Instruction,
     native_token::LAMPORTS_PER_SOL,
@@ -19,7 +20,7 @@ use arena_lock_v2::{
         position_pda, roll_epoch, vault_authority_pda, withdraw,
     },
     processor::process_instruction,
-    state::{ArenaConfig, ArenaPosition},
+    state::{ArenaConfig, ArenaPosition, CONFIG_SIZE, POSITION_SIZE},
 };
 
 const DECIMALS: u8 = 6;
@@ -319,6 +320,16 @@ async fn load_position(context: &mut ProgramTestContext, position: Pubkey) -> Ar
     ArenaPosition::load(&account.data).unwrap()
 }
 
+fn program_account(data: Vec<u8>, lamports: u64) -> AccountSharedData {
+    AccountSharedData::from(Account {
+        lamports,
+        data,
+        owner: id(),
+        executable: false,
+        rent_epoch: 0,
+    })
+}
+
 struct ArenaFixture {
     context: ProgramTestContext,
     authority: Keypair,
@@ -447,6 +458,90 @@ async fn setup_arena(
         config,
         position,
     }
+}
+
+#[tokio::test]
+async fn rejects_program_owned_config_at_wrong_pda() {
+    let flavor = TokenFlavor::Spl;
+    let mut fixture = setup_arena(flavor, 6, 1_000, 10, 10, 1_000, 100).await;
+    let fake_config_key = Pubkey::new_unique();
+    let rent = fixture.context.banks_client.get_rent().await.unwrap();
+    let mut fake_config = load_config(&mut fixture.context, fixture.config).await;
+    fake_config.last_epoch_ts = 0;
+    fake_config.epoch_seconds = 1;
+    let mut fake_config_data = vec![0; CONFIG_SIZE];
+    fake_config.store(&mut fake_config_data).unwrap();
+    let fake_config_account = program_account(fake_config_data, rent.minimum_balance(CONFIG_SIZE));
+    fixture
+        .context
+        .set_account(&fake_config_key, &fake_config_account);
+
+    let mut ix = roll_epoch(id(), fixture.authority.pubkey(), fixture.config_id);
+    ix.accounts[0].pubkey = fake_config_key;
+    process_tx_expect_err(&mut fixture.context, &[], vec![ix]).await;
+}
+
+#[tokio::test]
+async fn rejects_program_owned_position_at_wrong_pda() {
+    let flavor = TokenFlavor::Spl;
+    let mut fixture = setup_arena(flavor, 7, 1_000, 10, 10, 1_000, 100).await;
+    let amount = 1_000;
+
+    process_tx(
+        &mut fixture.context,
+        &[&fixture.user],
+        vec![deposit(
+            id(),
+            fixture.authority.pubkey(),
+            fixture.config_id,
+            fixture.user.pubkey(),
+            fixture.user_token.pubkey(),
+            fixture.vault_token.pubkey(),
+            fixture.mint.pubkey(),
+            flavor.program_id(),
+            amount,
+        )],
+    )
+    .await;
+
+    let fake_position_key = Pubkey::new_unique();
+    let rent = fixture.context.banks_client.get_rent().await.unwrap();
+    let fake_position = ArenaPosition {
+        is_initialized: true,
+        config: fixture.config,
+        owner: fixture.user.pubkey(),
+        locked_amount: amount,
+        eligible_amount: 0,
+        pending_activation_amount: amount,
+        total_deposited: amount,
+        total_withdrawn: 0,
+        total_penalty_paid: 0,
+        total_burned: 0,
+        total_rewards_claimed: 0,
+        pending_rewards: 0,
+        lock_start_ts: 0,
+        unlock_ts: 1_000,
+        activation_ts: 0,
+        last_activity_ts: 0,
+        reward_index_checkpoint: 0,
+        position_bump: 0,
+    };
+    let mut fake_position_data = vec![0; POSITION_SIZE];
+    fake_position.store(&mut fake_position_data).unwrap();
+    let fake_position_account =
+        program_account(fake_position_data, rent.minimum_balance(POSITION_SIZE));
+    fixture
+        .context
+        .set_account(&fake_position_key, &fake_position_account);
+
+    let mut ix = activate_position(
+        id(),
+        fixture.authority.pubkey(),
+        fixture.config_id,
+        fixture.user.pubkey(),
+    );
+    ix.accounts[2].pubkey = fake_position_key;
+    process_tx_expect_err(&mut fixture.context, &[&fixture.user], vec![ix]).await;
 }
 
 #[tokio::test]
