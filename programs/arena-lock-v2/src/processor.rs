@@ -247,9 +247,12 @@ fn mint_decimals(mint: &AccountInfo, token_program: &Pubkey) -> Result<u8, Progr
         return Err(ArenaError::InvalidTokenMint.into());
     }
     if *token_program == spl_token::id() {
-        Ok(spl_token::state::Mint::unpack(&mint.data.borrow())
-            .map_err(|_| ArenaError::InvalidTokenMint)?
-            .decimals)
+        let mint_state = spl_token::state::Mint::unpack(&mint.data.borrow())
+            .map_err(|_| ArenaError::InvalidTokenMint)?;
+        if mint_state.freeze_authority.is_some() {
+            return Err(ArenaError::InvalidTokenMint.into());
+        }
+        Ok(mint_state.decimals)
     } else if *token_program == spl_token_2022::id() {
         let mint_data = mint.data.borrow();
         let mint_state = StateWithExtensions::<spl_token_2022::state::Mint>::unpack(&mint_data)
@@ -259,6 +262,9 @@ fn mint_decimals(mint: &AccountInfo, token_program: &Pubkey) -> Result<u8, Progr
             .map_err(|_| ArenaError::InvalidTokenMint)?
             .is_empty()
         {
+            return Err(ArenaError::InvalidTokenMint.into());
+        }
+        if mint_state.base.freeze_authority.is_some() {
             return Err(ArenaError::InvalidTokenMint.into());
         }
         Ok(mint_state.base.decimals)

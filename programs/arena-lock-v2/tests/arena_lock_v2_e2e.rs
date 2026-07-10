@@ -545,6 +545,76 @@ async fn rejects_program_owned_position_at_wrong_pda() {
 }
 
 #[tokio::test]
+async fn rejects_attacker_position_and_destination_substitution() {
+    let flavor = TokenFlavor::Spl;
+    let mut fixture = setup_arena(flavor, 8, 1_000, 10, 10, 1_000, 100).await;
+    let attacker = Keypair::new();
+    let attacker_token = Keypair::new();
+    let amount = 1_000;
+
+    fund(&mut fixture.context, &attacker.pubkey(), LAMPORTS_PER_SOL).await;
+    create_token_account(
+        &mut fixture.context,
+        flavor,
+        &fixture.mint.pubkey(),
+        &attacker.pubkey(),
+        &attacker_token,
+    )
+    .await;
+
+    process_tx(
+        &mut fixture.context,
+        &[&fixture.user],
+        vec![deposit(
+            id(),
+            fixture.authority.pubkey(),
+            fixture.config_id,
+            fixture.user.pubkey(),
+            fixture.user_token.pubkey(),
+            fixture.vault_token.pubkey(),
+            fixture.mint.pubkey(),
+            flavor.program_id(),
+            amount,
+        )],
+    )
+    .await;
+
+    let mut attacker_withdraw = withdraw(
+        id(),
+        fixture.authority.pubkey(),
+        fixture.config_id,
+        attacker.pubkey(),
+        attacker_token.pubkey(),
+        fixture.vault_token.pubkey(),
+        fixture.reward_pool_token.pubkey(),
+        fixture.mint.pubkey(),
+        flavor.program_id(),
+        100,
+    );
+    attacker_withdraw.accounts[3].pubkey = fixture.position;
+    process_tx_expect_err(&mut fixture.context, &[&attacker], vec![attacker_withdraw]).await;
+
+    let redirected_withdraw = withdraw(
+        id(),
+        fixture.authority.pubkey(),
+        fixture.config_id,
+        fixture.user.pubkey(),
+        attacker_token.pubkey(),
+        fixture.vault_token.pubkey(),
+        fixture.reward_pool_token.pubkey(),
+        fixture.mint.pubkey(),
+        flavor.program_id(),
+        100,
+    );
+    process_tx_expect_err(
+        &mut fixture.context,
+        &[&fixture.user],
+        vec![redirected_withdraw],
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn activation_epoch_roll_and_claim_rewards() {
     let flavor = TokenFlavor::Spl;
     let mut fixture = setup_arena(flavor, 1, 1_000, 10, 10, 1_000, 100).await;
@@ -955,6 +1025,85 @@ async fn rejects_burn_share_above_total_penalty() {
             100,
             1_000,
             1_001,
+            mint.pubkey(),
+            vault_token.pubkey(),
+            reward_pool_token.pubkey(),
+            flavor.program_id(),
+            DECIMALS,
+        )],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn rejects_mint_with_freeze_authority() {
+    let flavor = TokenFlavor::Spl;
+    let mut context = start().await;
+    let authority = Keypair::new();
+    let freeze_authority = Keypair::new();
+    let mint = Keypair::new();
+    let vault_token = Keypair::new();
+    let reward_pool_token = Keypair::new();
+    let config_id = 9;
+
+    fund(&mut context, &authority.pubkey(), LAMPORTS_PER_SOL).await;
+    let rent = context.banks_client.get_rent().await.unwrap();
+    let payer = context.payer.pubkey();
+    let (config, _) = config_pda(&id(), &authority.pubkey(), config_id);
+    let (vault_authority, _) = vault_authority_pda(&id(), &config);
+
+    process_tx(
+        &mut context,
+        &[&mint],
+        vec![
+            system_instruction::create_account(
+                &payer,
+                &mint.pubkey(),
+                rent.minimum_balance(flavor.mint_len()),
+                flavor.mint_len() as u64,
+                &flavor.program_id(),
+            ),
+            spl_token::instruction::initialize_mint(
+                &flavor.program_id(),
+                &mint.pubkey(),
+                &payer,
+                Some(&freeze_authority.pubkey()),
+                DECIMALS,
+            )
+            .unwrap(),
+        ],
+    )
+    .await;
+    create_token_account(
+        &mut context,
+        flavor,
+        &mint.pubkey(),
+        &vault_authority,
+        &vault_token,
+    )
+    .await;
+    create_token_account(
+        &mut context,
+        flavor,
+        &mint.pubkey(),
+        &vault_authority,
+        &reward_pool_token,
+    )
+    .await;
+
+    process_tx_expect_err(
+        &mut context,
+        &[&authority],
+        vec![initialize_config(
+            id(),
+            authority.pubkey(),
+            config_id,
+            1_000,
+            10,
+            10,
+            100,
+            1_000,
+            100,
             mint.pubkey(),
             vault_token.pubkey(),
             reward_pool_token.pubkey(),
