@@ -42,6 +42,7 @@ pub struct ArenaConfig {
     pub total_penalties_collected: u64,
     pub total_burned: u64,
     pub reward_index: u128,
+    pub total_rewards_expired: u64,
 }
 
 impl ArenaConfig {

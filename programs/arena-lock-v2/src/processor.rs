@@ -348,6 +348,19 @@ fn accrue_rewards(config: &ArenaConfig, position: &mut ArenaPosition) -> Program
     Ok(())
 }
 
+fn expire_pending_rewards_accounting(arena_config: &mut ArenaConfig) -> ProgramResult {
+    let expired = arena_config.pending_rewards;
+    if expired == 0 {
+        return Ok(());
+    }
+    arena_config.pending_rewards = 0;
+    arena_config.total_rewards_expired = arena_config
+        .total_rewards_expired
+        .checked_add(expired)
+        .ok_or(ArenaError::MathOverflow)?;
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn process_initialize_config(
     program_id: &Pubkey,
@@ -470,6 +483,7 @@ fn process_initialize_config(
         total_penalties_collected: 0,
         total_burned: 0,
         reward_index: 0,
+        total_rewards_expired: 0,
     };
     arena_config.store(&mut config.data.borrow_mut())
 }
@@ -658,6 +672,9 @@ fn process_activate_position(program_id: &Pubkey, accounts: &[AccountInfo]) -> P
     }
 
     accrue_rewards(&arena_config, &mut arena_position)?;
+    if arena_config.eligible_locked == 0 {
+        expire_pending_rewards_accounting(&mut arena_config)?;
+    }
     let amount = arena_position.pending_activation_amount;
     arena_position.pending_activation_amount = 0;
     arena_position.eligible_amount = arena_position
@@ -707,6 +724,9 @@ fn process_fund_rewards(
         || arena_config.reward_pool_token_account != *reward_pool_token_account.key
     {
         return Err(ArenaError::InvalidTokenMint.into());
+    }
+    if arena_config.eligible_locked == 0 {
+        return Err(ArenaError::NoEligibleStake.into());
     }
     let (vault_authority, _) =
         Pubkey::find_program_address(&[VAULT_AUTHORITY_SEED, config.key.as_ref()], program_id);
@@ -771,7 +791,9 @@ fn process_roll_epoch(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramR
         return Err(ArenaError::EpochNotReady.into());
     }
 
-    if arena_config.pending_rewards > 0 && arena_config.eligible_locked > 0 {
+    if arena_config.pending_rewards > 0 && arena_config.eligible_locked == 0 {
+        expire_pending_rewards_accounting(&mut arena_config)?;
+    } else if arena_config.pending_rewards > 0 {
         let delta_index = u128::from(arena_config.pending_rewards)
             .checked_mul(REWARD_INDEX_SCALE)
             .ok_or(ArenaError::MathOverflow)?
@@ -886,6 +908,39 @@ fn burn_from_vault<'a>(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
+fn burn_expired_pending_rewards<'a>(
+    token_program: &AccountInfo<'a>,
+    reward_pool_token_account: &AccountInfo<'a>,
+    mint: &AccountInfo<'a>,
+    vault_authority: &AccountInfo<'a>,
+    arena_config: &mut ArenaConfig,
+    config_key: &Pubkey,
+    vault_authority_bump: u8,
+) -> ProgramResult {
+    let expired = arena_config.pending_rewards;
+    if expired == 0 {
+        return Ok(());
+    }
+
+    burn_from_vault(
+        token_program,
+        reward_pool_token_account,
+        mint,
+        vault_authority,
+        expired,
+        arena_config.decimals,
+        config_key,
+        vault_authority_bump,
+    )?;
+    expire_pending_rewards_accounting(arena_config)?;
+    arena_config.total_burned = arena_config
+        .total_burned
+        .checked_add(expired)
+        .ok_or(ArenaError::MathOverflow)?;
+    Ok(())
+}
+
 fn process_claim_rewards(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     let account_info_iter = &mut accounts.iter();
     let owner = next_account_info(account_info_iter)?;
@@ -933,6 +988,9 @@ fn process_claim_rewards(program_id: &Pubkey, accounts: &[AccountInfo]) -> Progr
         return Err(ArenaError::InvalidPda.into());
     }
     assert_position_pda(program_id, position, config.key, owner.key)?;
+    if arena_position.locked_amount == 0 {
+        return Err(ArenaError::InsufficientPositionBalance.into());
+    }
     accrue_rewards(&arena_config, &mut arena_position)?;
     if arena_position.pending_rewards == 0 {
         return Err(ArenaError::NoRewards.into());
@@ -1136,6 +1194,14 @@ fn process_withdraw(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) 
         return Err(ArenaError::InsufficientPositionBalance.into());
     }
     let full_exit = amount == arena_position.locked_amount;
+    let pending_reduction = arena_position.pending_activation_amount.min(amount);
+    let eligible_reduction = amount
+        .checked_sub(pending_reduction)
+        .ok_or(ArenaError::MathOverflow)?;
+    let eligible_locked_after = arena_config
+        .eligible_locked
+        .checked_sub(eligible_reduction)
+        .ok_or(ArenaError::MathOverflow)?;
 
     accrue_rewards(&arena_config, &mut arena_position)?;
     if full_exit {
@@ -1153,7 +1219,7 @@ fn process_withdraw(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) 
     }
 
     let now = Clock::get()?.unix_timestamp;
-    let (reward_penalty, burned) =
+    let (mut reward_penalty, mut burned) =
         if now < arena_position.unlock_ts && arena_config.early_exit_penalty_bps > 0 {
             penalty_split(
                 amount,
@@ -1163,6 +1229,21 @@ fn process_withdraw(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) 
         } else {
             (0, 0)
         };
+    if eligible_locked_after == 0 {
+        burned = burned
+            .checked_add(reward_penalty)
+            .ok_or(ArenaError::MathOverflow)?;
+        reward_penalty = 0;
+        burn_expired_pending_rewards(
+            token_program,
+            reward_pool_token_account,
+            mint,
+            vault_authority,
+            &mut arena_config,
+            config.key,
+            vault_authority_bump,
+        )?;
+    }
     let penalty = reward_penalty
         .checked_add(burned)
         .ok_or(ArenaError::MathOverflow)?;

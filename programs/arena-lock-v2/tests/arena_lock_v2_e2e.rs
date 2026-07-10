@@ -615,6 +615,79 @@ async fn rejects_attacker_position_and_destination_substitution() {
 }
 
 #[tokio::test]
+async fn rejects_reward_funding_without_eligible_stake() {
+    let flavor = TokenFlavor::Spl;
+    let mut fixture = setup_arena(flavor, 11, 1_000, 10, 10, 1_000, 100).await;
+
+    process_tx_expect_err(
+        &mut fixture.context,
+        &[&fixture.funder],
+        vec![fund_rewards(
+            id(),
+            fixture.authority.pubkey(),
+            fixture.config_id,
+            fixture.funder.pubkey(),
+            fixture.funder_token.pubkey(),
+            fixture.reward_pool_token.pubkey(),
+            fixture.mint.pubkey(),
+            flavor.program_id(),
+            100_000,
+        )],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn rejects_claim_from_zero_stake_orphan_position() {
+    let flavor = TokenFlavor::Spl;
+    let mut fixture = setup_arena(flavor, 12, 1_000, 10, 10, 1_000, 100).await;
+    let (_, position_bump) = position_pda(&id(), &fixture.config, &fixture.user.pubkey());
+    let rent = fixture.context.banks_client.get_rent().await.unwrap();
+    let orphan_position = ArenaPosition {
+        is_initialized: true,
+        config: fixture.config,
+        owner: fixture.user.pubkey(),
+        locked_amount: 0,
+        eligible_amount: 0,
+        pending_activation_amount: 0,
+        total_deposited: 1_000,
+        total_withdrawn: 1_000,
+        total_penalty_paid: 0,
+        total_burned: 0,
+        total_rewards_claimed: 0,
+        pending_rewards: 1_000,
+        lock_start_ts: 0,
+        unlock_ts: 0,
+        activation_ts: 0,
+        last_activity_ts: 0,
+        reward_index_checkpoint: 0,
+        position_bump,
+    };
+    let mut position_data = vec![0; POSITION_SIZE];
+    orphan_position.store(&mut position_data).unwrap();
+    let position_account = program_account(position_data, rent.minimum_balance(POSITION_SIZE));
+    fixture
+        .context
+        .set_account(&fixture.position, &position_account);
+
+    process_tx_expect_err(
+        &mut fixture.context,
+        &[&fixture.user],
+        vec![claim_rewards(
+            id(),
+            fixture.authority.pubkey(),
+            fixture.config_id,
+            fixture.user.pubkey(),
+            fixture.user_token.pubkey(),
+            fixture.reward_pool_token.pubkey(),
+            fixture.mint.pubkey(),
+            flavor.program_id(),
+        )],
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn activation_epoch_roll_and_claim_rewards() {
     let flavor = TokenFlavor::Spl;
     let mut fixture = setup_arena(flavor, 1, 1_000, 10, 10, 1_000, 100).await;
@@ -751,6 +824,18 @@ async fn early_exit_splits_penalty_between_rewards_and_burn() {
         )],
     )
     .await;
+    advance_time(&mut fixture.context, 11).await;
+    process_tx(
+        &mut fixture.context,
+        &[&fixture.user],
+        vec![activate_position(
+            id(),
+            fixture.authority.pubkey(),
+            fixture.config_id,
+            fixture.user.pubkey(),
+        )],
+    )
+    .await;
     process_tx(
         &mut fixture.context,
         &[&fixture.user],
@@ -772,7 +857,8 @@ async fn early_exit_splits_penalty_between_rewards_and_burn() {
     let config = load_config(&mut fixture.context, fixture.config).await;
     let position = load_position(&mut fixture.context, fixture.position).await;
     assert_eq!(config.total_locked, 900_000);
-    assert_eq!(config.pending_activation_locked, 900_000);
+    assert_eq!(config.eligible_locked, 900_000);
+    assert_eq!(config.pending_activation_locked, 0);
     assert_eq!(config.pending_rewards, 9_000);
     assert_eq!(config.total_penalties_collected, 10_000);
     assert_eq!(config.total_burned, 1_000);
@@ -794,6 +880,100 @@ async fn early_exit_splits_penalty_between_rewards_and_burn() {
     assert_eq!(
         token_balance(&mut fixture.context, flavor, fixture.vault_token.pubkey()).await,
         900_000
+    );
+}
+
+#[tokio::test]
+async fn early_exit_with_no_remaining_eligible_burns_full_penalty() {
+    let flavor = TokenFlavor::Spl;
+    let mut fixture = setup_arena(flavor, 10, 1_000, 10, 10, 1_000, 100).await;
+    let amount = 1_000_000;
+    let reward = 100_000;
+
+    process_tx(
+        &mut fixture.context,
+        &[&fixture.user],
+        vec![deposit(
+            id(),
+            fixture.authority.pubkey(),
+            fixture.config_id,
+            fixture.user.pubkey(),
+            fixture.user_token.pubkey(),
+            fixture.vault_token.pubkey(),
+            fixture.mint.pubkey(),
+            flavor.program_id(),
+            amount,
+        )],
+    )
+    .await;
+    advance_time(&mut fixture.context, 11).await;
+    process_tx(
+        &mut fixture.context,
+        &[&fixture.user],
+        vec![activate_position(
+            id(),
+            fixture.authority.pubkey(),
+            fixture.config_id,
+            fixture.user.pubkey(),
+        )],
+    )
+    .await;
+    process_tx(
+        &mut fixture.context,
+        &[&fixture.funder],
+        vec![fund_rewards(
+            id(),
+            fixture.authority.pubkey(),
+            fixture.config_id,
+            fixture.funder.pubkey(),
+            fixture.funder_token.pubkey(),
+            fixture.reward_pool_token.pubkey(),
+            fixture.mint.pubkey(),
+            flavor.program_id(),
+            reward,
+        )],
+    )
+    .await;
+    process_tx(
+        &mut fixture.context,
+        &[&fixture.user],
+        vec![withdraw(
+            id(),
+            fixture.authority.pubkey(),
+            fixture.config_id,
+            fixture.user.pubkey(),
+            fixture.user_token.pubkey(),
+            fixture.vault_token.pubkey(),
+            fixture.reward_pool_token.pubkey(),
+            fixture.mint.pubkey(),
+            flavor.program_id(),
+            amount,
+        )],
+    )
+    .await;
+
+    let config = load_config(&mut fixture.context, fixture.config).await;
+    let position = load_position(&mut fixture.context, fixture.position).await;
+    assert_eq!(config.total_locked, 0);
+    assert_eq!(config.eligible_locked, 0);
+    assert_eq!(config.pending_rewards, 0);
+    assert_eq!(config.total_rewards_expired, reward);
+    assert_eq!(config.total_penalties_collected, 100_000);
+    assert_eq!(config.total_burned, 200_000);
+    assert_eq!(position.total_penalty_paid, 100_000);
+    assert_eq!(position.total_burned, 100_000);
+    assert_eq!(
+        token_balance(
+            &mut fixture.context,
+            flavor,
+            fixture.reward_pool_token.pubkey()
+        )
+        .await,
+        0
+    );
+    assert_eq!(
+        token_balance(&mut fixture.context, flavor, fixture.vault_token.pubkey()).await,
+        0
     );
 }
 
@@ -880,18 +1060,18 @@ async fn full_exit_settles_rewards_and_leaves_no_post_exit_claim() {
     let position = load_position(&mut fixture.context, fixture.position).await;
     assert_eq!(config.total_locked, 0);
     assert_eq!(config.eligible_locked, 0);
-    assert_eq!(config.pending_rewards, 90_000);
+    assert_eq!(config.pending_rewards, 0);
     assert_eq!(config.total_rewards_distributed, reward);
     assert_eq!(config.total_rewards_claimed, reward);
     assert_eq!(config.total_penalties_collected, 100_000);
-    assert_eq!(config.total_burned, 10_000);
+    assert_eq!(config.total_burned, 100_000);
     assert_eq!(position.locked_amount, 0);
     assert_eq!(position.eligible_amount, 0);
     assert_eq!(position.pending_rewards, 0);
     assert_eq!(position.total_rewards_claimed, reward);
     assert_eq!(position.total_withdrawn, 900_000);
     assert_eq!(position.total_penalty_paid, 100_000);
-    assert_eq!(position.total_burned, 10_000);
+    assert_eq!(position.total_burned, 100_000);
     assert_eq!(
         token_balance(&mut fixture.context, flavor, fixture.user_token.pubkey()).await,
         USER_STARTING_TOKENS
@@ -903,7 +1083,7 @@ async fn full_exit_settles_rewards_and_leaves_no_post_exit_claim() {
             fixture.reward_pool_token.pubkey()
         )
         .await,
-        90_000
+        0
     );
     assert_eq!(
         token_balance(&mut fixture.context, flavor, fixture.vault_token.pubkey()).await,
@@ -945,6 +1125,18 @@ async fn token_2022_plain_accounts_support_burn_and_reward_pool_path() {
             fixture.mint.pubkey(),
             flavor.program_id(),
             1_000,
+        )],
+    )
+    .await;
+    advance_time(&mut fixture.context, 11).await;
+    process_tx(
+        &mut fixture.context,
+        &[&fixture.user],
+        vec![activate_position(
+            id(),
+            fixture.authority.pubkey(),
+            fixture.config_id,
+            fixture.user.pubkey(),
         )],
     )
     .await;

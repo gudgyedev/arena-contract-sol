@@ -27,6 +27,8 @@ pub enum ArenaError {
     ActivationNotReady,
     #[error("No rewards are claimable")]
     NoRewards,
+    #[error("No eligible stake")]
+    NoEligibleStake,
     #[error("Insufficient position balance")]
     InsufficientPositionBalance,
     #[error("Invalid treasury account")]
