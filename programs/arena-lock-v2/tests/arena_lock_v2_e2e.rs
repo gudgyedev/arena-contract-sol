@@ -1789,8 +1789,7 @@ async fn tiny_early_exit_with_floor_penalty_returns_principal() {
 #[tokio::test]
 async fn roll_epoch_does_not_recredit_reward_remainder() {
     let flavor = TokenFlavor::Spl;
-    let mut fixture =
-        setup_arena_with_min_deposit(flavor, 90, 1_000, 5, 10, 1_000, 100, 1).await;
+    let mut fixture = setup_arena_with_min_deposit(flavor, 90, 1_000, 5, 10, 1_000, 100, 1).await;
     let stake = 3u64;
     let funded = 2u64;
 
@@ -1973,8 +1972,7 @@ async fn roll_epoch_does_not_recredit_reward_remainder() {
 #[tokio::test]
 async fn warming_stake_cannot_snipe_funded_rewards_on_same_epoch_roll() {
     let flavor = TokenFlavor::Spl;
-    let mut fixture =
-        setup_arena_with_min_deposit(flavor, 91, 100, 5, 10, 1_000, 100, 1).await;
+    let mut fixture = setup_arena_with_min_deposit(flavor, 91, 100, 5, 10, 1_000, 100, 1).await;
 
     // Honest staker matures first.
     process_tx(

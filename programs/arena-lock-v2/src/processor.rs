@@ -1200,9 +1200,7 @@ fn burn_unallocated_reward_pool<'a>(
 ) -> ProgramResult {
     let pending = arena_config.pending_rewards;
     let dust = arena_config.reward_dust;
-    let expired = pending
-        .checked_add(dust)
-        .ok_or(ArenaError::MathOverflow)?;
+    let expired = pending.checked_add(dust).ok_or(ArenaError::MathOverflow)?;
     if expired == 0 {
         return Ok(());
     }
@@ -1222,8 +1220,7 @@ fn burn_unallocated_reward_pool<'a>(
     }
     if dust > 0 {
         arena_config.reward_dust = 0;
-        arena_config.total_rewards_expired =
-            sat_add_u64(arena_config.total_rewards_expired, dust);
+        arena_config.total_rewards_expired = sat_add_u64(arena_config.total_rewards_expired, dust);
     }
     arena_config.total_burned = sat_add_u64(arena_config.total_burned, expired);
     Ok(())
