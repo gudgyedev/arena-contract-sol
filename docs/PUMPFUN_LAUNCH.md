@@ -46,15 +46,22 @@ solana program deploy target/deploy/arena_lock_v2.so \
   --keypair "$KEYPAIR"
 ```
 
-After soak, freeze:
+After soak, freeze **the program id you actually deployed** (never a hardcoded
+devnet default — freezing the wrong id leaves mainnet upgradeable):
 
 ```bash
+# PROGRAM_ID must be the pubkey returned by `solana program deploy` on THIS cluster
 CONFIRM_FINAL=YES \
-PROGRAM_ID=Ac9fhZ2ZC19p7KEXtebhRweaqSEsuguSAXXnFNr1ML75 \
+PROGRAM_ID=<mainnet-or-target-program-id> \
 AUTHORITY_KEYPAIR=$KEYPAIR \
 RPC_URL=$RPC_URL \
   scripts/make-program-immutable.sh
 ```
+
+**Stop before mainnet:** re-run adversarial review on this commit, prefer formal
+audit + verified builds, then deploy under multisig/timelock. See
+`docs/SECURITY_ADVERSARIAL_FINDINGS.md`. Engineering Highs H-01/H-02/H-03 are
+fixed in source; that is not the same as firm-certified mainnet.
 
 ## After you have the pump mint
 

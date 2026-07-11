@@ -10,6 +10,7 @@ pub const CONFIG_SIZE: usize = 640;
 pub const POSITION_SIZE: usize = 384;
 pub const MAX_ARENA_EARLY_EXIT_PENALTY_BPS: u16 = 5_000;
 pub const REWARD_INDEX_SCALE: u128 = 1_000_000_000_000_000_000;
+pub const BPS_DENOMINATOR: u64 = 10_000;
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ArenaConfig {
@@ -33,6 +34,7 @@ pub struct ArenaConfig {
     pub last_epoch_ts: i64,
     pub current_epoch: u64,
     pub total_locked: u64,
+    /// Stake that earns rewards and is used as the RollEpoch distribution base.
     pub eligible_locked: u64,
     pub pending_activation_locked: u64,
     pub pending_rewards: u64,
@@ -43,6 +45,12 @@ pub struct ArenaConfig {
     pub total_burned: u64,
     pub reward_index: u128,
     pub total_rewards_expired: u64,
+    /// Tokens indexed away but not claimable via floor math. Never re-indexed.
+    /// Burned when mature eligible stake is zero.
+    pub reward_dust: u64,
+    /// H-02: activated stake waiting until `current_epoch > warming_epoch` on the
+    /// position. Excluded from reward distribution / funding base.
+    pub warming_locked: u64,
 }
 
 impl ArenaConfig {
@@ -72,6 +80,7 @@ pub struct ArenaPosition {
     pub config: Pubkey,
     pub owner: Pubkey,
     pub locked_amount: u64,
+    /// Mature stake that accrues reward index.
     pub eligible_amount: u64,
     pub pending_activation_amount: u64,
     pub total_deposited: u64,
@@ -86,6 +95,14 @@ pub struct ArenaPosition {
     pub last_activity_ts: i64,
     pub reward_index_checkpoint: u128,
     pub position_bump: u8,
+    /// H-02: activated but not yet mature for rewards.
+    pub warming_amount: u64,
+    /// Epoch at activate time; matures when config.current_epoch > warming_epoch.
+    pub warming_epoch: u64,
+    /// H-03: residual of amount*bps for cumulative early-exit penalty.
+    pub penalty_remainder: u64,
+    /// M-04: residual of eligible*delta for fairer multi-user accrual.
+    pub reward_accrual_remainder: u128,
 }
 
 impl ArenaPosition {

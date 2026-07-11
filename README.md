@@ -42,4 +42,18 @@ See `docs/AUDIT_PACKAGE.md` for the required external-review package, launch pre
 
 ## Status
 
-This is devnet-tested contract code for Bullring. It is not mainnet-public-funds ready without production authority controls, independent review, and an external audit.
+**Not mainnet-public-funds ready** (needs re-review / audit / verified builds).
+
+Adversarial Highs from the last pass are **fixed in source**:
+
+| ID | Topic | Status |
+|----|--------|--------|
+| H-01 | Reward remainder re-index | Fixed |
+| H-02 | JIT reward sniping (warming stake) | Fixed |
+| H-03 | Split early-exit penalty bypass | Fixed |
+| M-04 / M-05 | Dust / counter DoS | Mitigated / fixed |
+
+See `docs/SECURITY_ADVERSARIAL_FINDINGS.md`. Prior “10/10 RC” claim remains **retracted**.
+
+**Product note:** after `ActivatePosition`, stake is **warming** until the next epoch
+roll + a position touch; only then is it mature for funding/rewards.
