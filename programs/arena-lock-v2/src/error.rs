@@ -43,6 +43,10 @@ pub enum ArenaError {
     MathOverflow,
     #[error("Account is not writable")]
     AccountNotWritable,
+    #[error("Unsupported state version")]
+    UnsupportedStateVersion,
+    #[error("Funding snapshot mismatch")]
+    FundingSnapshotMismatch,
 }
 
 impl From<ArenaError> for ProgramError {

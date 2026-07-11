@@ -13,9 +13,11 @@ This repository intentionally contains only the arena contract we have been work
 - SPL Token and plain Token-2022 staking
 - Per-user position PDA with pending activation and eligible stake accounting
 - Configurable minimum lock time, activation delay, epoch length, minimum deposit, early-exit penalty, and burn share
-- Explicitly funded reward pools, rolled by epoch and claimed by users
-- Early exits can split penalty between reward pool and burn
+- Explicitly funded rewards indexed immediately against mature eligible stake
+- Epochs gate warming stake maturation; they do not hold a mutable reward batch
+- Early exits split penalty between direct burn and redistribution when mature stake remains
 - Full position exit settles pending rewards so users do not remain unstaked with dangling claimable rewards
+- Final reward-pool surplus is burned from the actual pool balance only after all stake/reward debt is gone
 
 Current devnet program id:
 
@@ -51,9 +53,11 @@ Adversarial Highs from the last pass are **fixed in source**:
 | H-01 | Reward remainder re-index | Fixed |
 | H-02 | JIT reward sniping (warming stake) | Fixed |
 | H-03 | Split early-exit penalty bypass | Fixed |
-| M-04 / M-05 | Dust / counter DoS | Mitigated / fixed |
+| M-04 / M-05 | Dust / counter DoS | Fixed / mitigated |
 
 See `docs/SECURITY_ADVERSARIAL_FINDINGS.md`. Prior “10/10 RC” claim remains **retracted**.
 
-**Product note:** after `ActivatePosition`, stake is **warming** until the next epoch
-roll + a position touch; only then is it mature for funding/rewards.
+**Product note:** after `ActivatePosition`, stake is **warming** until the next
+epoch roll plus a position touch; only then is it mature for funding/rewards.
+Treasury funding should use `FundRewardsChecked` so the funder binds the transfer
+to the expected mature denominator and epoch.

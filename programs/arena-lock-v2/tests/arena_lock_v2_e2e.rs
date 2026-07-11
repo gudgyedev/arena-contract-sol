@@ -16,11 +16,12 @@ use solana_sdk::{
 use arena_lock_v2::{
     id,
     instruction::{
-        activate_position, claim_rewards, config_pda, deposit, fund_rewards, initialize_config,
-        position_pda, roll_epoch, vault_authority_pda, withdraw,
+        activate_position, claim_rewards, config_pda, deposit, finalize_rewards, fund_rewards,
+        fund_rewards_checked, initialize_config, position_pda, roll_epoch, vault_authority_pda,
+        withdraw,
     },
     processor::process_instruction,
-    state::{ArenaConfig, ArenaPosition, CONFIG_SIZE, POSITION_SIZE},
+    state::{ArenaConfig, ArenaPosition, ARENA_POSITION_VERSION, CONFIG_SIZE, POSITION_SIZE},
 };
 
 const DECIMALS: u8 = 6;
@@ -674,6 +675,7 @@ async fn rejects_program_owned_position_at_wrong_pda() {
     let rent = fixture.context.banks_client.get_rent().await.unwrap();
     let fake_position = ArenaPosition {
         is_initialized: true,
+        version: ARENA_POSITION_VERSION,
         config: fixture.config,
         owner: fixture.user.pubkey(),
         locked_amount: amount,
@@ -690,10 +692,12 @@ async fn rejects_program_owned_position_at_wrong_pda() {
         activation_ts: 0,
         last_activity_ts: 0,
         reward_index_checkpoint: 0,
+        reward_index_generation_checkpoint: 0,
         position_bump: 0,
         warming_amount: 0,
         warming_epoch: 0,
         penalty_remainder: 0,
+        burn_remainder: 0,
         reward_accrual_remainder: 0,
     };
     let mut fake_position_data = vec![0; POSITION_SIZE];
@@ -811,6 +815,113 @@ async fn rejects_reward_funding_without_eligible_stake() {
 }
 
 #[tokio::test]
+async fn checked_reward_funding_rejects_stale_eligible_snapshot() {
+    let flavor = TokenFlavor::Spl;
+    let mut fixture = setup_arena_with_min_deposit(flavor, 97, 1_000, 5, 10, 0, 0, 1).await;
+    let deposit_amount = 100_000;
+    let reward_amount = 25_000;
+
+    process_tx(
+        &mut fixture.context,
+        &[&fixture.user],
+        vec![deposit(
+            id(),
+            fixture.authority.pubkey(),
+            fixture.config_id,
+            fixture.user.pubkey(),
+            fixture.user_token.pubkey(),
+            fixture.vault_token.pubkey(),
+            fixture.mint.pubkey(),
+            flavor.program_id(),
+            deposit_amount,
+        )],
+    )
+    .await;
+    advance_time(&mut fixture.context, 6).await;
+    process_tx(
+        &mut fixture.context,
+        &[&fixture.user],
+        vec![activate_position(
+            id(),
+            fixture.authority.pubkey(),
+            fixture.config_id,
+            fixture.user.pubkey(),
+            fixture.reward_pool_token.pubkey(),
+            fixture.mint.pubkey(),
+            flavor.program_id(),
+        )],
+    )
+    .await;
+    mature_after_activate(&mut fixture, flavor).await;
+
+    let config = load_config(&mut fixture.context, fixture.config).await;
+    assert_eq!(config.eligible_locked, deposit_amount);
+    let funder_before =
+        token_balance(&mut fixture.context, flavor, fixture.funder_token.pubkey()).await;
+    let pool_before = token_balance(
+        &mut fixture.context,
+        flavor,
+        fixture.reward_pool_token.pubkey(),
+    )
+    .await;
+
+    process_tx_expect_err(
+        &mut fixture.context,
+        &[&fixture.funder],
+        vec![fund_rewards_checked(
+            id(),
+            fixture.funder.pubkey(),
+            fixture.config_id,
+            fixture.authority.pubkey(),
+            fixture.funder_token.pubkey(),
+            fixture.reward_pool_token.pubkey(),
+            fixture.mint.pubkey(),
+            flavor.program_id(),
+            reward_amount,
+            deposit_amount - 1,
+            config.current_epoch,
+        )],
+    )
+    .await;
+
+    assert_eq!(
+        token_balance(&mut fixture.context, flavor, fixture.funder_token.pubkey()).await,
+        funder_before
+    );
+    assert_eq!(
+        token_balance(
+            &mut fixture.context,
+            flavor,
+            fixture.reward_pool_token.pubkey()
+        )
+        .await,
+        pool_before
+    );
+
+    process_tx(
+        &mut fixture.context,
+        &[&fixture.funder],
+        vec![fund_rewards_checked(
+            id(),
+            fixture.funder.pubkey(),
+            fixture.config_id,
+            fixture.authority.pubkey(),
+            fixture.funder_token.pubkey(),
+            fixture.reward_pool_token.pubkey(),
+            fixture.mint.pubkey(),
+            flavor.program_id(),
+            reward_amount,
+            deposit_amount,
+            config.current_epoch,
+        )],
+    )
+    .await;
+    let config = load_config(&mut fixture.context, fixture.config).await;
+    assert_eq!(config.total_rewards_funded, reward_amount);
+    assert_eq!(config.total_rewards_distributed, reward_amount);
+}
+
+#[tokio::test]
 async fn rejects_claim_from_zero_stake_orphan_position() {
     let flavor = TokenFlavor::Spl;
     let mut fixture = setup_arena(flavor, 12, 1_000, 10, 10, 1_000, 100).await;
@@ -818,6 +929,7 @@ async fn rejects_claim_from_zero_stake_orphan_position() {
     let rent = fixture.context.banks_client.get_rent().await.unwrap();
     let orphan_position = ArenaPosition {
         is_initialized: true,
+        version: ARENA_POSITION_VERSION,
         config: fixture.config,
         owner: fixture.user.pubkey(),
         locked_amount: 0,
@@ -834,10 +946,12 @@ async fn rejects_claim_from_zero_stake_orphan_position() {
         activation_ts: 0,
         last_activity_ts: 0,
         reward_index_checkpoint: 0,
+        reward_index_generation_checkpoint: 0,
         position_bump,
         warming_amount: 0,
         warming_epoch: 0,
         penalty_remainder: 0,
+        burn_remainder: 0,
         reward_accrual_remainder: 0,
     };
     let mut position_data = vec![0; POSITION_SIZE];
@@ -1057,11 +1171,11 @@ async fn early_exit_splits_penalty_between_rewards_and_burn() {
     assert_eq!(config.eligible_locked, 0);
     assert_eq!(config.warming_locked, 900_000);
     assert_eq!(config.pending_activation_locked, 0);
-    assert_eq!(config.pending_rewards, 9_000);
+    assert_eq!(config.pending_rewards, 0);
     assert_eq!(config.total_penalties_collected, 10_000);
-    assert_eq!(config.total_burned, 1_000);
+    assert_eq!(config.total_burned, 10_000);
     assert_eq!(position.total_penalty_paid, 10_000);
-    assert_eq!(position.total_burned, 1_000);
+    assert_eq!(position.total_burned, 10_000);
     assert_eq!(
         token_balance(&mut fixture.context, flavor, fixture.user_token.pubkey()).await,
         USER_STARTING_TOKENS - amount + 90_000
@@ -1073,7 +1187,7 @@ async fn early_exit_splits_penalty_between_rewards_and_burn() {
             fixture.reward_pool_token.pubkey()
         )
         .await,
-        9_000
+        0
     );
     assert_eq!(
         token_balance(&mut fixture.context, flavor, fixture.vault_token.pubkey()).await,
@@ -1159,9 +1273,9 @@ async fn early_exit_with_no_remaining_eligible_burns_full_penalty() {
     assert_eq!(config.total_locked, 0);
     assert_eq!(config.eligible_locked, 0);
     assert_eq!(config.pending_rewards, 0);
-    assert_eq!(config.total_rewards_expired, reward);
+    assert_eq!(config.total_rewards_expired, 0);
     assert_eq!(config.total_penalties_collected, 100_000);
-    assert_eq!(config.total_burned, 200_000);
+    assert_eq!(config.total_burned, 100_000);
     assert_eq!(position.total_penalty_paid, 100_000);
     assert_eq!(position.total_burned, 100_000);
     assert_eq!(
@@ -1372,8 +1486,8 @@ async fn token_2022_plain_accounts_support_burn_and_reward_pool_path() {
     .await;
 
     let config = load_config(&mut fixture.context, fixture.config).await;
-    assert_eq!(config.total_burned, 5);
-    assert_eq!(config.pending_rewards, 45);
+    assert_eq!(config.total_burned, 50);
+    assert_eq!(config.pending_rewards, 0);
 }
 
 #[tokio::test]
@@ -1789,7 +1903,7 @@ async fn tiny_early_exit_with_floor_penalty_returns_principal() {
 #[tokio::test]
 async fn roll_epoch_does_not_recredit_reward_remainder() {
     let flavor = TokenFlavor::Spl;
-    let mut fixture = setup_arena_with_min_deposit(flavor, 90, 1_000, 5, 10, 1_000, 100, 1).await;
+    let mut fixture = setup_arena_with_min_deposit(flavor, 90, 1_000, 5, 10, 0, 0, 1).await;
     let stake = 3u64;
     let funded = 2u64;
 
@@ -1865,19 +1979,10 @@ async fn roll_epoch_does_not_recredit_reward_remainder() {
     let config_after_rolls = load_config(&mut fixture.context, fixture.config).await;
     assert_eq!(
         config_after_rolls.pending_rewards, 0,
-        "funded batch must be fully consumed after a successful index step"
+        "funded batch is indexed immediately"
     );
-    assert!(
-        config_after_rolls.total_rewards_distributed <= funded,
-        "distributed {} exceeds funded {}",
-        config_after_rolls.total_rewards_distributed,
-        funded
-    );
-    assert_eq!(
-        config_after_rolls.total_rewards_distributed + config_after_rolls.reward_dust,
-        funded,
-        "accounted + dust must equal the funded batch"
-    );
+    assert_eq!(config_after_rolls.total_rewards_distributed, funded);
+    assert_eq!(config_after_rolls.reward_dust, 0);
 
     let balance_before_claim =
         token_balance(&mut fixture.context, flavor, fixture.user_token.pubkey()).await;
@@ -1904,7 +2009,6 @@ async fn roll_epoch_does_not_recredit_reward_remainder() {
         claimed <= funded,
         "H-01: claimed {claimed} exceeds funded {funded} after multi-roll remainder re-credit"
     );
-    // Pre-fix claimed 3; post-fix must claim the index-accounted amount only (1).
     assert_eq!(claimed, 1, "sole staker earns floor(2*SCALE/3)*3/SCALE = 1");
 
     // Fund +1 more and roll once: total lifetime claim must stay ≤ total funded.
@@ -1940,11 +2044,12 @@ async fn roll_epoch_does_not_recredit_reward_remainder() {
     )
     .await;
 
-    // Extra fund of 1 with eligible 3 → accounted would be 0, so pending stays
-    // (not indexed). No new claimable rewards yet.
     let config_after_extra = load_config(&mut fixture.context, fixture.config).await;
-    assert_eq!(config_after_extra.pending_rewards, extra);
-    process_tx_expect_err(
+    assert_eq!(config_after_extra.pending_rewards, 0);
+    assert_eq!(config_after_extra.total_rewards_distributed, funded + extra);
+    let before_second_claim =
+        token_balance(&mut fixture.context, flavor, fixture.user_token.pubkey()).await;
+    process_tx(
         &mut fixture.context,
         &[&fixture.user],
         vec![claim_rewards(
@@ -1959,9 +2064,16 @@ async fn roll_epoch_does_not_recredit_reward_remainder() {
         )],
     )
     .await;
+    let second_claimed = token_balance(&mut fixture.context, flavor, fixture.user_token.pubkey())
+        .await
+        - before_second_claim;
+    assert_eq!(
+        second_claimed, 1,
+        "fractional carry can crystallize later funding"
+    );
 
     let config = load_config(&mut fixture.context, fixture.config).await;
-    assert_eq!(config.total_rewards_claimed, claimed);
+    assert_eq!(config.total_rewards_claimed, claimed + second_claimed);
     assert!(
         config.total_rewards_claimed <= config.total_rewards_funded,
         "lifetime claimed exceeds lifetime funded"
@@ -1972,7 +2084,7 @@ async fn roll_epoch_does_not_recredit_reward_remainder() {
 #[tokio::test]
 async fn warming_stake_cannot_snipe_funded_rewards_on_same_epoch_roll() {
     let flavor = TokenFlavor::Spl;
-    let mut fixture = setup_arena_with_min_deposit(flavor, 91, 100, 5, 10, 1_000, 100, 1).await;
+    let mut fixture = setup_arena_with_min_deposit(flavor, 91, 100, 5, 10, 0, 0, 1).await;
 
     // Honest staker matures first.
     process_tx(
@@ -2145,14 +2257,485 @@ async fn warming_stake_cannot_snipe_funded_rewards_on_same_epoch_roll() {
     assert!(sniper_position.warming_amount > 0 || sniper_position.eligible_amount > 0);
 }
 
+#[tokio::test]
+async fn prearmed_warming_stake_cannot_sync_then_snipe_target_roll() {
+    let flavor = TokenFlavor::Spl;
+    let mut fixture = setup_arena_with_min_deposit(flavor, 94, 30, 5, 10, 0, 0, 1).await;
+
+    process_tx(
+        &mut fixture.context,
+        &[&fixture.user],
+        vec![deposit(
+            id(),
+            fixture.authority.pubkey(),
+            fixture.config_id,
+            fixture.user.pubkey(),
+            fixture.user_token.pubkey(),
+            fixture.vault_token.pubkey(),
+            fixture.mint.pubkey(),
+            flavor.program_id(),
+            100,
+        )],
+    )
+    .await;
+    advance_time(&mut fixture.context, 6).await;
+    process_tx(
+        &mut fixture.context,
+        &[&fixture.user],
+        vec![activate_position(
+            id(),
+            fixture.authority.pubkey(),
+            fixture.config_id,
+            fixture.user.pubkey(),
+            fixture.reward_pool_token.pubkey(),
+            fixture.mint.pubkey(),
+            flavor.program_id(),
+        )],
+    )
+    .await;
+    mature_after_activate(&mut fixture, flavor).await;
+
+    let sniper = Keypair::new();
+    let sniper_token = Keypair::new();
+    fund(&mut fixture.context, &sniper.pubkey(), LAMPORTS_PER_SOL).await;
+    create_token_account(
+        &mut fixture.context,
+        flavor,
+        &fixture.mint.pubkey(),
+        &sniper.pubkey(),
+        &sniper_token,
+    )
+    .await;
+    process_tx(
+        &mut fixture.context,
+        &[&fixture.funder],
+        vec![spl_token::instruction::transfer(
+            &flavor.program_id(),
+            &fixture.funder_token.pubkey(),
+            &sniper_token.pubkey(),
+            &fixture.funder.pubkey(),
+            &[],
+            50_000,
+        )
+        .unwrap()],
+    )
+    .await;
+    process_tx(
+        &mut fixture.context,
+        &[&sniper],
+        vec![deposit(
+            id(),
+            fixture.authority.pubkey(),
+            fixture.config_id,
+            sniper.pubkey(),
+            sniper_token.pubkey(),
+            fixture.vault_token.pubkey(),
+            fixture.mint.pubkey(),
+            flavor.program_id(),
+            50_000,
+        )],
+    )
+    .await;
+    advance_time(&mut fixture.context, 6).await;
+    process_tx(
+        &mut fixture.context,
+        &[&sniper],
+        vec![activate_position(
+            id(),
+            fixture.authority.pubkey(),
+            fixture.config_id,
+            sniper.pubkey(),
+            fixture.reward_pool_token.pubkey(),
+            fixture.mint.pubkey(),
+            flavor.program_id(),
+        )],
+    )
+    .await;
+
+    // Advance one epoch without touching the sniper. Its warming stake is now
+    // ready to mature but still excluded from eligible_locked.
+    advance_time(&mut fixture.context, 11).await;
+    process_tx(
+        &mut fixture.context,
+        &[],
+        vec![roll_epoch(
+            id(),
+            fixture.authority.pubkey(),
+            fixture.config_id,
+            fixture.reward_pool_token.pubkey(),
+            fixture.mint.pubkey(),
+            flavor.program_id(),
+        )],
+    )
+    .await;
+    let config_before_fund = load_config(&mut fixture.context, fixture.config).await;
+    assert_eq!(config_before_fund.eligible_locked, 100);
+    assert_eq!(config_before_fund.warming_locked, 50_000);
+
+    let reward = 1_000u64;
+    process_tx(
+        &mut fixture.context,
+        &[&fixture.funder],
+        vec![fund_rewards(
+            id(),
+            fixture.authority.pubkey(),
+            fixture.config_id,
+            fixture.funder.pubkey(),
+            fixture.funder_token.pubkey(),
+            fixture.reward_pool_token.pubkey(),
+            fixture.mint.pubkey(),
+            flavor.program_id(),
+            reward,
+        )],
+    )
+    .await;
+
+    // Same transaction shape from the audit: sync maturity, roll, full exit.
+    advance_time(&mut fixture.context, 40).await;
+    process_tx(
+        &mut fixture.context,
+        &[&sniper],
+        vec![
+            activate_position(
+                id(),
+                fixture.authority.pubkey(),
+                fixture.config_id,
+                sniper.pubkey(),
+                fixture.reward_pool_token.pubkey(),
+                fixture.mint.pubkey(),
+                flavor.program_id(),
+            ),
+            roll_epoch(
+                id(),
+                fixture.authority.pubkey(),
+                fixture.config_id,
+                fixture.reward_pool_token.pubkey(),
+                fixture.mint.pubkey(),
+                flavor.program_id(),
+            ),
+            withdraw(
+                id(),
+                fixture.authority.pubkey(),
+                fixture.config_id,
+                sniper.pubkey(),
+                sniper_token.pubkey(),
+                fixture.vault_token.pubkey(),
+                fixture.reward_pool_token.pubkey(),
+                fixture.mint.pubkey(),
+                flavor.program_id(),
+                50_000,
+            ),
+        ],
+    )
+    .await;
+
+    let sniper_position = load_position(
+        &mut fixture.context,
+        position_pda(&id(), &fixture.config, &sniper.pubkey()).0,
+    )
+    .await;
+    assert_eq!(sniper_position.total_rewards_claimed, 0);
+    assert_eq!(
+        token_balance(&mut fixture.context, flavor, sniper_token.pubkey()).await,
+        50_000
+    );
+
+    let before_honest_claim =
+        token_balance(&mut fixture.context, flavor, fixture.user_token.pubkey()).await;
+    process_tx(
+        &mut fixture.context,
+        &[&fixture.user],
+        vec![claim_rewards(
+            id(),
+            fixture.authority.pubkey(),
+            fixture.config_id,
+            fixture.user.pubkey(),
+            fixture.user_token.pubkey(),
+            fixture.reward_pool_token.pubkey(),
+            fixture.mint.pubkey(),
+            flavor.program_id(),
+        )],
+    )
+    .await;
+    let honest_claimed = token_balance(&mut fixture.context, flavor, fixture.user_token.pubkey())
+        .await
+        - before_honest_claim;
+    assert_eq!(honest_claimed, reward);
+}
+
+#[tokio::test]
+async fn maturing_topup_preserves_existing_eligible_rewards() {
+    let flavor = TokenFlavor::Spl;
+    let mut fixture = setup_arena_with_min_deposit(flavor, 95, 100, 5, 10, 0, 0, 1).await;
+
+    process_tx(
+        &mut fixture.context,
+        &[&fixture.user],
+        vec![deposit(
+            id(),
+            fixture.authority.pubkey(),
+            fixture.config_id,
+            fixture.user.pubkey(),
+            fixture.user_token.pubkey(),
+            fixture.vault_token.pubkey(),
+            fixture.mint.pubkey(),
+            flavor.program_id(),
+            100,
+        )],
+    )
+    .await;
+    advance_time(&mut fixture.context, 6).await;
+    process_tx(
+        &mut fixture.context,
+        &[&fixture.user],
+        vec![activate_position(
+            id(),
+            fixture.authority.pubkey(),
+            fixture.config_id,
+            fixture.user.pubkey(),
+            fixture.reward_pool_token.pubkey(),
+            fixture.mint.pubkey(),
+            flavor.program_id(),
+        )],
+    )
+    .await;
+    mature_after_activate(&mut fixture, flavor).await;
+
+    process_tx(
+        &mut fixture.context,
+        &[&fixture.user],
+        vec![deposit(
+            id(),
+            fixture.authority.pubkey(),
+            fixture.config_id,
+            fixture.user.pubkey(),
+            fixture.user_token.pubkey(),
+            fixture.vault_token.pubkey(),
+            fixture.mint.pubkey(),
+            flavor.program_id(),
+            1,
+        )],
+    )
+    .await;
+    advance_time(&mut fixture.context, 6).await;
+    process_tx(
+        &mut fixture.context,
+        &[&fixture.user],
+        vec![activate_position(
+            id(),
+            fixture.authority.pubkey(),
+            fixture.config_id,
+            fixture.user.pubkey(),
+            fixture.reward_pool_token.pubkey(),
+            fixture.mint.pubkey(),
+            flavor.program_id(),
+        )],
+    )
+    .await;
+
+    process_tx(
+        &mut fixture.context,
+        &[&fixture.funder],
+        vec![fund_rewards(
+            id(),
+            fixture.authority.pubkey(),
+            fixture.config_id,
+            fixture.funder.pubkey(),
+            fixture.funder_token.pubkey(),
+            fixture.reward_pool_token.pubkey(),
+            fixture.mint.pubkey(),
+            flavor.program_id(),
+            100,
+        )],
+    )
+    .await;
+
+    advance_time(&mut fixture.context, 11).await;
+    process_tx(
+        &mut fixture.context,
+        &[&fixture.user],
+        vec![activate_position(
+            id(),
+            fixture.authority.pubkey(),
+            fixture.config_id,
+            fixture.user.pubkey(),
+            fixture.reward_pool_token.pubkey(),
+            fixture.mint.pubkey(),
+            flavor.program_id(),
+        )],
+    )
+    .await;
+
+    let before_claim =
+        token_balance(&mut fixture.context, flavor, fixture.user_token.pubkey()).await;
+    process_tx(
+        &mut fixture.context,
+        &[&fixture.user],
+        vec![claim_rewards(
+            id(),
+            fixture.authority.pubkey(),
+            fixture.config_id,
+            fixture.user.pubkey(),
+            fixture.user_token.pubkey(),
+            fixture.reward_pool_token.pubkey(),
+            fixture.mint.pubkey(),
+            flavor.program_id(),
+        )],
+    )
+    .await;
+    let claimed = token_balance(&mut fixture.context, flavor, fixture.user_token.pubkey()).await
+        - before_claim;
+    assert_eq!(claimed, 100);
+}
+
+#[tokio::test]
+async fn fractional_batches_do_not_block_full_exit_and_finalize_surplus() {
+    let flavor = TokenFlavor::Spl;
+    let mut fixture = setup_arena_with_min_deposit(flavor, 96, 1_000, 5, 10, 0, 0, 1).await;
+
+    process_tx(
+        &mut fixture.context,
+        &[&fixture.user],
+        vec![deposit(
+            id(),
+            fixture.authority.pubkey(),
+            fixture.config_id,
+            fixture.user.pubkey(),
+            fixture.user_token.pubkey(),
+            fixture.vault_token.pubkey(),
+            fixture.mint.pubkey(),
+            flavor.program_id(),
+            3,
+        )],
+    )
+    .await;
+    advance_time(&mut fixture.context, 6).await;
+    process_tx(
+        &mut fixture.context,
+        &[&fixture.user],
+        vec![activate_position(
+            id(),
+            fixture.authority.pubkey(),
+            fixture.config_id,
+            fixture.user.pubkey(),
+            fixture.reward_pool_token.pubkey(),
+            fixture.mint.pubkey(),
+            flavor.program_id(),
+        )],
+    )
+    .await;
+    mature_after_activate(&mut fixture, flavor).await;
+
+    for expected_claim in [1u64, 2u64] {
+        process_tx(
+            &mut fixture.context,
+            &[&fixture.funder],
+            vec![fund_rewards(
+                id(),
+                fixture.authority.pubkey(),
+                fixture.config_id,
+                fixture.funder.pubkey(),
+                fixture.funder_token.pubkey(),
+                fixture.reward_pool_token.pubkey(),
+                fixture.mint.pubkey(),
+                flavor.program_id(),
+                2,
+            )],
+        )
+        .await;
+        let before = token_balance(&mut fixture.context, flavor, fixture.user_token.pubkey()).await;
+        process_tx(
+            &mut fixture.context,
+            &[&fixture.user],
+            vec![claim_rewards(
+                id(),
+                fixture.authority.pubkey(),
+                fixture.config_id,
+                fixture.user.pubkey(),
+                fixture.user_token.pubkey(),
+                fixture.reward_pool_token.pubkey(),
+                fixture.mint.pubkey(),
+                flavor.program_id(),
+            )],
+        )
+        .await;
+        let claimed =
+            token_balance(&mut fixture.context, flavor, fixture.user_token.pubkey()).await - before;
+        assert_eq!(claimed, expected_claim);
+    }
+    assert_eq!(
+        token_balance(
+            &mut fixture.context,
+            flavor,
+            fixture.reward_pool_token.pubkey()
+        )
+        .await,
+        1
+    );
+
+    advance_time(&mut fixture.context, 1_001).await;
+    process_tx(
+        &mut fixture.context,
+        &[&fixture.user],
+        vec![withdraw(
+            id(),
+            fixture.authority.pubkey(),
+            fixture.config_id,
+            fixture.user.pubkey(),
+            fixture.user_token.pubkey(),
+            fixture.vault_token.pubkey(),
+            fixture.reward_pool_token.pubkey(),
+            fixture.mint.pubkey(),
+            flavor.program_id(),
+            3,
+        )],
+    )
+    .await;
+    assert_eq!(
+        token_balance(&mut fixture.context, flavor, fixture.vault_token.pubkey()).await,
+        0
+    );
+    assert_eq!(
+        token_balance(
+            &mut fixture.context,
+            flavor,
+            fixture.reward_pool_token.pubkey()
+        )
+        .await,
+        1
+    );
+
+    process_tx(
+        &mut fixture.context,
+        &[],
+        vec![finalize_rewards(
+            id(),
+            fixture.authority.pubkey(),
+            fixture.config_id,
+            fixture.reward_pool_token.pubkey(),
+            fixture.mint.pubkey(),
+            flavor.program_id(),
+        )],
+    )
+    .await;
+    assert_eq!(
+        token_balance(
+            &mut fixture.context,
+            flavor,
+            fixture.reward_pool_token.pubkey()
+        )
+        .await,
+        0
+    );
+}
+
 /// H-03: split early exits must accumulate the same penalty as one bulk exit.
 #[tokio::test]
 async fn split_early_exit_penalty_matches_bulk_exit() {
     let flavor = TokenFlavor::Spl;
-    // 50% early exit, min deposit 1
-    let mut bulk = setup_arena_with_min_deposit(flavor, 92, 1_000, 10, 10, 5_000, 0, 1).await;
-    let mut split = setup_arena_with_min_deposit(flavor, 93, 1_000, 10, 10, 5_000, 0, 1).await;
-    let deposit_amount = 2u64;
+    let mut bulk = setup_arena_with_min_deposit(flavor, 92, 1_000, 10, 10, 5_000, 0, 2).await;
+    let mut split = setup_arena_with_min_deposit(flavor, 93, 1_000, 10, 10, 5_000, 0, 2).await;
+    let deposit_amount = 3u64;
 
     for fixture in [&mut bulk, &mut split] {
         process_tx(
@@ -2173,7 +2756,7 @@ async fn split_early_exit_penalty_matches_bulk_exit() {
         .await;
     }
 
-    // Bulk: Withdraw(2) at 50% → penalty 1
+    // Bulk: Withdraw(2) at 50% -> penalty 1, with one unit still locked.
     process_tx(
         &mut bulk.context,
         &[&bulk.user],
@@ -2194,7 +2777,8 @@ async fn split_early_exit_penalty_matches_bulk_exit() {
     let bulk_pos = load_position(&mut bulk.context, bulk.position).await;
     assert_eq!(bulk_pos.total_penalty_paid, 1);
 
-    // Split: Withdraw(1) + Withdraw(1) must also total penalty 1 (not 0+0).
+    // Split: Withdraw(1) + Withdraw(1) must also total penalty 1 (not 0+0)
+    // while the position remains continuously open.
     process_tx(
         &mut split.context,
         &[&split.user],
@@ -2212,6 +2796,10 @@ async fn split_early_exit_penalty_matches_bulk_exit() {
         )],
     )
     .await;
+    let split_after_first = load_position(&mut split.context, split.position).await;
+    assert_eq!(split_after_first.total_penalty_paid, 0);
+    assert_eq!(split_after_first.penalty_remainder, 5_000);
+    advance_time(&mut split.context, 1).await;
     process_tx(
         &mut split.context,
         &[&split.user],
@@ -2230,6 +2818,9 @@ async fn split_early_exit_penalty_matches_bulk_exit() {
     )
     .await;
     let split_pos = load_position(&mut split.context, split.position).await;
+    assert_eq!(split_pos.locked_amount, 1);
+    assert_eq!(split_pos.penalty_remainder, 0);
+    assert_eq!(split_pos.total_burned, 1);
     assert_eq!(
         split_pos.total_penalty_paid, bulk_pos.total_penalty_paid,
         "H-03: split early exits must not bypass cumulative penalty"

@@ -4,7 +4,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 NO_DNA=1 cargo fmt --check
-NO_DNA=1 cargo test -p arena-lock-v2
+# ProgramTest suites manipulate bank clock/sysvar state; serial execution avoids
+# false negatives from concurrent native test contexts.
+NO_DNA=1 cargo test -p arena-lock-v2 -- --test-threads=1
 NO_DNA=1 cargo clippy -p arena-lock-v2 --all-targets --all-features -- -D warnings
 NO_DNA=1 cargo build-sbf --manifest-path programs/arena-lock-v2/Cargo.toml
 NO_DNA=1 cargo deny --workspace check --exclude-dev --config deny.toml advisories sources

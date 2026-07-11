@@ -11,10 +11,13 @@ pub const POSITION_SIZE: usize = 384;
 pub const MAX_ARENA_EARLY_EXIT_PENALTY_BPS: u16 = 5_000;
 pub const REWARD_INDEX_SCALE: u128 = 1_000_000_000_000_000_000;
 pub const BPS_DENOMINATOR: u64 = 10_000;
+pub const ARENA_CONFIG_VERSION: u8 = 2;
+pub const ARENA_POSITION_VERSION: u8 = 2;
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ArenaConfig {
     pub is_initialized: bool,
+    pub version: u8,
     pub config_id: u64,
     pub authority: Pubkey,
     pub mint: Pubkey,
@@ -44,9 +47,9 @@ pub struct ArenaConfig {
     pub total_penalties_collected: u64,
     pub total_burned: u64,
     pub reward_index: u128,
+    pub reward_index_generation: u64,
     pub total_rewards_expired: u64,
-    /// Tokens indexed away but not claimable via floor math. Never re-indexed.
-    /// Burned when mature eligible stake is zero.
+    /// Deprecated in version 2. Kept for layout compatibility and must stay zero.
     pub reward_dust: u64,
     /// H-02: activated stake waiting until `current_epoch > warming_epoch` on the
     /// position. Excluded from reward distribution / funding base.
@@ -59,6 +62,9 @@ impl ArenaConfig {
         let config = Self::deserialize(&mut slice).map_err(|_| ArenaError::NotInitialized)?;
         if !config.is_initialized {
             return Err(ArenaError::NotInitialized.into());
+        }
+        if config.version != ARENA_CONFIG_VERSION {
+            return Err(ArenaError::UnsupportedStateVersion.into());
         }
         Ok(config)
     }
@@ -77,6 +83,7 @@ impl ArenaConfig {
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ArenaPosition {
     pub is_initialized: bool,
+    pub version: u8,
     pub config: Pubkey,
     pub owner: Pubkey,
     pub locked_amount: u64,
@@ -94,6 +101,7 @@ pub struct ArenaPosition {
     pub activation_ts: i64,
     pub last_activity_ts: i64,
     pub reward_index_checkpoint: u128,
+    pub reward_index_generation_checkpoint: u64,
     pub position_bump: u8,
     /// H-02: activated but not yet mature for rewards.
     pub warming_amount: u64,
@@ -101,6 +109,8 @@ pub struct ArenaPosition {
     pub warming_epoch: u64,
     /// H-03: residual of amount*bps for cumulative early-exit penalty.
     pub penalty_remainder: u64,
+    /// Residual of amount*burn_bps for cumulative direct-burn accounting.
+    pub burn_remainder: u64,
     /// M-04: residual of eligible*delta for fairer multi-user accrual.
     pub reward_accrual_remainder: u128,
 }
@@ -111,6 +121,9 @@ impl ArenaPosition {
         let position = Self::deserialize(&mut slice).map_err(|_| ArenaError::NotInitialized)?;
         if !position.is_initialized {
             return Err(ArenaError::NotInitialized.into());
+        }
+        if position.version != ARENA_POSITION_VERSION {
+            return Err(ArenaError::UnsupportedStateVersion.into());
         }
         Ok(position)
     }

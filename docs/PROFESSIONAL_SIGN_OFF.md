@@ -12,7 +12,7 @@
 | Layer | Score |
 |--------|--------|
 | Account / PDA / custody | **~8.5–9 / 10** (still strong) |
-| Economic / reward / penalty logic after this pass | **Ready for re-review** — prior Highs addressed in source |
+| Economic / reward / penalty logic after this pass | **Ready for re-review** - re-audit Highs addressed in source |
 | Mainnet public-funds readiness | **Still not 10/10** — needs external audit, verified builds, ops |
 | Prior “10/10 engineering RC” claim | **Retracted** and replaced by this document |
 
@@ -22,11 +22,13 @@
 
 | Finding | Treatment |
 |---------|-----------|
-| H-01 reward remainder re-index | Fixed + regression test |
-| H-02 JIT sniping | Fixed via warming / next-epoch maturity + regression test |
-| H-03 penalty floor bypass | Fixed via cumulative remainder + tests |
-| M-04 dust | Mitigated (dust field + accrual remainder + empty burn) |
-| M-05 counter DoS | Saturating telemetry counters |
+| H-01 pre-armed warming sniping | Fixed by funding-time indexing + checked funding |
+| H-02 top-up maturity erases rewards | Fixed by accrue-before-promotion |
+| H-03 unsafe reward dust/final exit block | Fixed by actual-balance finalization |
+| M-01 penalty/burn partitioning | Fixed for one position lifecycle via independent remainders + min raw-unit guard |
+| M-02 old state migration | Fixed by v2 state-version rejection; fresh configs required |
+| M-03 real-token surplus | Fixed by `FinalizeRewards` |
+| M-04 finite counters/index | Mitigated; reviewers should inspect accumulator limits |
 
 See `docs/SECURITY_ADVERSARIAL_FINDINGS.md`.
 
@@ -37,6 +39,7 @@ See `docs/SECURITY_ADVERSARIAL_FINDINGS.md`.
 ```bash
 cd arena-contract-sol
 NO_DNA=1 cargo test -p arena-lock-v2
+NO_DNA=1 cargo test -p arena-lock-v2 -- --test-threads=1
 NO_DNA=1 cargo clippy -p arena-lock-v2 --all-targets -- -D warnings
 NO_DNA=1 cargo build-sbf --manifest-path programs/arena-lock-v2/Cargo.toml
 ```

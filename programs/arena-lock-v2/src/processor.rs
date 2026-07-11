@@ -18,9 +18,9 @@ use crate::{
     error::ArenaError,
     instruction::ArenaInstruction,
     state::{
-        ArenaConfig, ArenaPosition, BPS_DENOMINATOR, CONFIG_SEED, CONFIG_SIZE,
-        MAX_ARENA_EARLY_EXIT_PENALTY_BPS, POSITION_SEED, POSITION_SIZE, REWARD_INDEX_SCALE,
-        VAULT_AUTHORITY_SEED,
+        ArenaConfig, ArenaPosition, ARENA_CONFIG_VERSION, ARENA_POSITION_VERSION, BPS_DENOMINATOR,
+        CONFIG_SEED, CONFIG_SIZE, MAX_ARENA_EARLY_EXIT_PENALTY_BPS, POSITION_SEED, POSITION_SIZE,
+        REWARD_INDEX_SCALE, VAULT_AUTHORITY_SEED,
     },
 };
 
@@ -94,9 +94,20 @@ pub fn process_instruction(
         ArenaInstruction::Deposit { amount } => process_deposit(program_id, accounts, amount),
         ArenaInstruction::ActivatePosition => process_activate_position(program_id, accounts),
         ArenaInstruction::FundRewards { amount } => {
-            process_fund_rewards(program_id, accounts, amount)
+            process_fund_rewards(program_id, accounts, amount, None)
         }
+        ArenaInstruction::FundRewardsChecked {
+            amount,
+            expected_eligible_locked,
+            max_current_epoch,
+        } => process_fund_rewards(
+            program_id,
+            accounts,
+            amount,
+            Some((expected_eligible_locked, max_current_epoch)),
+        ),
         ArenaInstruction::RollEpoch => process_roll_epoch(program_id, accounts),
+        ArenaInstruction::FinalizeRewards => process_finalize_rewards(program_id, accounts),
         ArenaInstruction::ClaimRewards => process_claim_rewards(program_id, accounts),
         ArenaInstruction::Withdraw { amount } => process_withdraw(program_id, accounts, amount),
     }
@@ -249,6 +260,7 @@ fn burn_checked_ix(
 struct TokenAccountView {
     mint: Pubkey,
     owner: Pubkey,
+    amount: u64,
     is_initialized: bool,
     is_native: bool,
     is_frozen: bool,
@@ -274,6 +286,7 @@ fn unpack_token_account(
         Ok(TokenAccountView {
             mint: token_account.mint,
             owner: token_account.owner,
+            amount: token_account.amount,
             is_initialized: token_account.state == spl_token::state::AccountState::Initialized,
             is_native: coption_is_some(&token_account.is_native),
             is_frozen: token_account.is_frozen(),
@@ -293,6 +306,7 @@ fn unpack_token_account(
         Ok(TokenAccountView {
             mint: token_account.base.mint,
             owner: token_account.base.owner,
+            amount: token_account.base.amount,
             is_initialized: token_account.base.state
                 == spl_token_2022::state::AccountState::Initialized,
             is_native: coption_is_some(&token_account.base.is_native),
@@ -415,6 +429,89 @@ fn assert_position_pda(
     Ok(())
 }
 
+fn reward_index_delta(amount: u64, eligible: u64) -> Result<u128, ProgramError> {
+    if amount == 0 || eligible == 0 {
+        return Err(ArenaError::InvalidAmount.into());
+    }
+    let delta = u128::from(amount)
+        .checked_mul(REWARD_INDEX_SCALE)
+        .ok_or(ArenaError::MathOverflow)?
+        .checked_div(u128::from(eligible))
+        .ok_or(ArenaError::MathOverflow)?;
+    if delta == 0 {
+        return Err(ArenaError::InvalidAmount.into());
+    }
+    Ok(delta)
+}
+
+fn add_reward_index(config: &mut ArenaConfig, delta: u128) -> ProgramResult {
+    let (next, wrapped) = config.reward_index.overflowing_add(delta);
+    config.reward_index = next;
+    if wrapped {
+        config.reward_index_generation = config
+            .reward_index_generation
+            .checked_add(1)
+            .ok_or(ArenaError::MathOverflow)?;
+    }
+    Ok(())
+}
+
+fn commit_rewards_to_index(
+    config: &mut ArenaConfig,
+    amount: u64,
+    eligible_snapshot: u64,
+) -> ProgramResult {
+    let delta = reward_index_delta(amount, eligible_snapshot)?;
+    add_reward_index(config, delta)?;
+    config.total_rewards_distributed = sat_add_u64(config.total_rewards_distributed, amount);
+    Ok(())
+}
+
+fn try_commit_rewards_to_index(
+    config: &mut ArenaConfig,
+    amount: u64,
+    eligible_snapshot: u64,
+) -> ProgramResult {
+    if amount == 0 || eligible_snapshot == 0 {
+        return Ok(());
+    }
+    if let Ok(delta) = reward_index_delta(amount, eligible_snapshot) {
+        add_reward_index(config, delta)?;
+        config.total_rewards_distributed = sat_add_u64(config.total_rewards_distributed, amount);
+    }
+    Ok(())
+}
+
+fn reward_index_delta_since(
+    config: &ArenaConfig,
+    position: &ArenaPosition,
+) -> Result<u128, ProgramError> {
+    if config.reward_index_generation == position.reward_index_generation_checkpoint {
+        if config.reward_index < position.reward_index_checkpoint {
+            return Err(ArenaError::MathOverflow.into());
+        }
+        return config
+            .reward_index
+            .checked_sub(position.reward_index_checkpoint)
+            .ok_or(ArenaError::MathOverflow.into());
+    }
+
+    let generation_delta = config
+        .reward_index_generation
+        .checked_sub(position.reward_index_generation_checkpoint)
+        .ok_or(ArenaError::MathOverflow)?;
+    if generation_delta != 1 {
+        return Err(ArenaError::MathOverflow.into());
+    }
+
+    let tail = u128::MAX
+        .checked_sub(position.reward_index_checkpoint)
+        .ok_or(ArenaError::MathOverflow)?;
+    let tail = tail.checked_add(1).ok_or(ArenaError::MathOverflow)?;
+    tail.checked_add(config.reward_index)
+        .ok_or(ArenaError::MathOverflow.into())
+}
+
 /// H-02: promote warming stake to mature eligible after at least one epoch
 /// boundary has passed since activation (`current_epoch > warming_epoch`).
 fn mature_warming_if_ready(
@@ -427,6 +524,7 @@ fn mature_warming_if_ready(
     if config.current_epoch <= position.warming_epoch {
         return Ok(());
     }
+    accrue_rewards(config, position)?;
     let amount = position.warming_amount;
     position.warming_amount = 0;
     position.eligible_amount = position
@@ -441,20 +539,14 @@ fn mature_warming_if_ready(
         .eligible_locked
         .checked_add(amount)
         .ok_or(ArenaError::MathOverflow)?;
-    // Start accruing only from the current index (missed the roll(s) while warming).
+    // New mature stake starts after all rewards already indexed at promotion time.
     position.reward_index_checkpoint = config.reward_index;
-    position.reward_accrual_remainder = 0;
+    position.reward_index_generation_checkpoint = config.reward_index_generation;
     Ok(())
 }
 
 fn accrue_rewards(config: &ArenaConfig, position: &mut ArenaPosition) -> ProgramResult {
-    if config.reward_index < position.reward_index_checkpoint {
-        return Err(ArenaError::MathOverflow.into());
-    }
-    let delta = config
-        .reward_index
-        .checked_sub(position.reward_index_checkpoint)
-        .ok_or(ArenaError::MathOverflow)?;
+    let delta = reward_index_delta_since(config, position)?;
     if delta > 0 && position.eligible_amount > 0 {
         // M-04: carry remainder so multi-user floor dust is minimized over time.
         let scaled = u128::from(position.eligible_amount)
@@ -475,16 +567,7 @@ fn accrue_rewards(config: &ArenaConfig, position: &mut ArenaPosition) -> Program
             .ok_or(ArenaError::MathOverflow)?;
     }
     position.reward_index_checkpoint = config.reward_index;
-    Ok(())
-}
-
-fn expire_pending_rewards_accounting(arena_config: &mut ArenaConfig) -> ProgramResult {
-    let expired = arena_config.pending_rewards;
-    if expired == 0 {
-        return Ok(());
-    }
-    arena_config.pending_rewards = 0;
-    arena_config.total_rewards_expired = sat_add_u64(arena_config.total_rewards_expired, expired);
+    position.reward_index_generation_checkpoint = config.reward_index_generation;
     Ok(())
 }
 
@@ -512,6 +595,22 @@ fn process_initialize_config(
         return Err(ArenaError::InvalidPenalty.into());
     }
     if burn_penalty_bps > early_exit_penalty_bps {
+        return Err(ArenaError::InvalidBurn.into());
+    }
+    if early_exit_penalty_bps > 0
+        && u128::from(min_deposit_amount)
+            .checked_mul(u128::from(early_exit_penalty_bps))
+            .ok_or(ArenaError::MathOverflow)?
+            < u128::from(BPS_DENOMINATOR)
+    {
+        return Err(ArenaError::InvalidPenalty.into());
+    }
+    if burn_penalty_bps > 0
+        && u128::from(min_deposit_amount)
+            .checked_mul(u128::from(burn_penalty_bps))
+            .ok_or(ArenaError::MathOverflow)?
+            < u128::from(BPS_DENOMINATOR)
+    {
         return Err(ArenaError::InvalidBurn.into());
     }
 
@@ -584,6 +683,7 @@ fn process_initialize_config(
     let now = Clock::get()?.unix_timestamp;
     let arena_config = ArenaConfig {
         is_initialized: true,
+        version: ARENA_CONFIG_VERSION,
         config_id,
         authority: *authority.key,
         mint: *mint.key,
@@ -612,6 +712,7 @@ fn process_initialize_config(
         total_penalties_collected: 0,
         total_burned: 0,
         reward_index: 0,
+        reward_index_generation: 0,
         total_rewards_expired: 0,
         reward_dust: 0,
         warming_locked: 0,
@@ -729,6 +830,7 @@ fn process_deposit(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) -
     } else {
         ArenaPosition {
             is_initialized: true,
+            version: ARENA_POSITION_VERSION,
             config: *config.key,
             owner: *owner.key,
             locked_amount: 0,
@@ -745,10 +847,12 @@ fn process_deposit(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) -
             activation_ts: 0,
             last_activity_ts: 0,
             reward_index_checkpoint: arena_config.reward_index,
+            reward_index_generation_checkpoint: arena_config.reward_index_generation,
             position_bump,
             warming_amount: 0,
             warming_epoch: 0,
             penalty_remainder: 0,
+            burn_remainder: 0,
             reward_accrual_remainder: 0,
         }
     };
@@ -773,10 +877,7 @@ fn process_deposit(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) -
         .pending_activation_amount
         .checked_add(amount)
         .ok_or(ArenaError::MathOverflow)?;
-    arena_position.total_deposited = arena_position
-        .total_deposited
-        .checked_add(amount)
-        .ok_or(ArenaError::MathOverflow)?;
+    arena_position.total_deposited = sat_add_u64(arena_position.total_deposited, amount);
 
     if !had_locked {
         arena_position.lock_start_ts = now;
@@ -835,7 +936,7 @@ fn process_activate_position(program_id: &Pubkey, accounts: &[AccountInfo]) -> P
     {
         return Err(ArenaError::InvalidTokenMint.into());
     }
-    let (expected_vault_authority, vault_authority_bump) =
+    let (expected_vault_authority, _) =
         Pubkey::find_program_address(&[VAULT_AUTHORITY_SEED, config.key.as_ref()], program_id);
     if expected_vault_authority != *vault_authority.key {
         return Err(ArenaError::InvalidPda.into());
@@ -875,22 +976,6 @@ fn process_activate_position(program_id: &Pubkey, accounts: &[AccountInfo]) -> P
     }
 
     accrue_rewards(&arena_config, &mut arena_position)?;
-    // Burn orphaned pending + dust when no mature stake exists yet
-    if arena_config.eligible_locked == 0
-        && (arena_config.pending_rewards > 0 || arena_config.reward_dust > 0)
-    {
-        assert_writable(reward_pool_token_account)?;
-        assert_writable(mint)?;
-        burn_unallocated_reward_pool(
-            token_program,
-            reward_pool_token_account,
-            mint,
-            vault_authority,
-            &mut arena_config,
-            config.key,
-            vault_authority_bump,
-        )?;
-    }
     // H-02: activation enters warming until the next epoch boundary passes.
     // Stake is excluded from RollEpoch distribution until matured.
     let amount = arena_position.pending_activation_amount;
@@ -922,6 +1007,7 @@ fn process_fund_rewards(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
     amount: u64,
+    expected_snapshot: Option<(u64, u64)>,
 ) -> ProgramResult {
     if amount == 0 {
         return Err(ArenaError::InvalidAmount.into());
@@ -953,6 +1039,15 @@ fn process_fund_rewards(
     if arena_config.eligible_locked == 0 {
         return Err(ArenaError::NoEligibleStake.into());
     }
+    let eligible_snapshot = arena_config.eligible_locked;
+    if let Some((expected_eligible_locked, max_current_epoch)) = expected_snapshot {
+        if eligible_snapshot != expected_eligible_locked
+            || arena_config.current_epoch > max_current_epoch
+        {
+            return Err(ArenaError::FundingSnapshotMismatch.into());
+        }
+    }
+    reward_index_delta(amount, eligible_snapshot)?;
     let (vault_authority, _) =
         Pubkey::find_program_address(&[VAULT_AUTHORITY_SEED, config.key.as_ref()], program_id);
     assert_token_account(
@@ -988,10 +1083,7 @@ fn process_fund_rewards(
         ],
     )?;
 
-    arena_config.pending_rewards = arena_config
-        .pending_rewards
-        .checked_add(amount)
-        .ok_or(ArenaError::MathOverflow)?;
+    commit_rewards_to_index(&mut arena_config, amount, eligible_snapshot)?;
     arena_config.total_rewards_funded = sat_add_u64(arena_config.total_rewards_funded, amount);
     arena_config.store(&mut config.data.borrow_mut())
 }
@@ -1017,7 +1109,7 @@ fn process_roll_epoch(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramR
     {
         return Err(ArenaError::InvalidTokenMint.into());
     }
-    let (expected_vault_authority, vault_authority_bump) =
+    let (expected_vault_authority, _) =
         Pubkey::find_program_address(&[VAULT_AUTHORITY_SEED, config.key.as_ref()], program_id);
     if expected_vault_authority != *vault_authority.key {
         return Err(ArenaError::InvalidPda.into());
@@ -1038,72 +1130,68 @@ fn process_roll_epoch(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramR
         return Err(ArenaError::EpochNotReady.into());
     }
 
-    if arena_config.eligible_locked == 0
-        && (arena_config.pending_rewards > 0 || arena_config.reward_dust > 0)
-    {
-        assert_writable(reward_pool_token_account)?;
-        assert_writable(mint)?;
-        burn_unallocated_reward_pool(
-            token_program,
-            reward_pool_token_account,
-            mint,
-            vault_authority,
-            &mut arena_config,
-            config.key,
-            vault_authority_bump,
-        )?;
-    } else if arena_config.pending_rewards > 0 {
-        // H-01: once-only index update. Never leave a floor remainder in
-        // `pending_rewards` to be re-indexed on later rolls (that minted phantom
-        // claimable rewards against future funding / pool insolvency).
-        let amount = arena_config.pending_rewards;
-        let eligible = arena_config.eligible_locked;
-        let delta_index = u128::from(amount)
-            .checked_mul(REWARD_INDEX_SCALE)
-            .ok_or(ArenaError::MathOverflow)?
-            .checked_div(u128::from(eligible))
-            .ok_or(ArenaError::MathOverflow)?;
-        if delta_index > 0 {
-            let accounted = delta_index
-                .checked_mul(u128::from(eligible))
-                .ok_or(ArenaError::MathOverflow)?
-                .checked_div(REWARD_INDEX_SCALE)
-                .ok_or(ArenaError::MathOverflow)?;
-            let accounted = u64::try_from(accounted).map_err(|_| ArenaError::MathOverflow)?;
-            // Only commit an index step when it creates ≥1 claimable unit against
-            // the full eligible set. Otherwise leave `pending_rewards` for a later
-            // fund/roll — never bump the index with a zero-accounted remainder
-            // (that was the H-01 phantom path when remainder was re-rolled).
-            if accounted > 0 {
-                let dust = amount
-                    .checked_sub(accounted)
-                    .ok_or(ArenaError::MathOverflow)?;
-
-                arena_config.reward_index = arena_config
-                    .reward_index
-                    .checked_add(delta_index)
-                    .ok_or(ArenaError::MathOverflow)?;
-                // Fully consume this funding batch — dust is not re-indexed.
-                arena_config.pending_rewards = 0;
-                arena_config.total_rewards_distributed =
-                    sat_add_u64(arena_config.total_rewards_distributed, accounted);
-                arena_config.reward_dust = arena_config
-                    .reward_dust
-                    .checked_add(dust)
-                    .ok_or(ArenaError::MathOverflow)?;
-            }
-        }
-        // If delta_index == 0 or accounted == 0, leave pending for a later
-        // fund/roll that can form a non-zero claimable index step.
-    }
-
-    // Advancing epoch allows warming positions (warming_epoch < new epoch) to
-    // mature on their next touch. Distribution above used only mature eligible.
+    // Rewards are indexed at funding time. Rolling only advances the admission
+    // epoch, so a same-transaction position touch cannot alter a funded batch's
+    // denominator.
     arena_config.current_epoch = arena_config
         .current_epoch
         .checked_add(1)
         .ok_or(ArenaError::MathOverflow)?;
-    arena_config.last_epoch_ts = now;
+    arena_config.last_epoch_ts = next_epoch_ts;
+    arena_config.store(&mut config.data.borrow_mut())
+}
+
+fn process_finalize_rewards(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    let config = next_account_info(account_info_iter)?;
+    let reward_pool_token_account = next_account_info(account_info_iter)?;
+    let vault_authority = next_account_info(account_info_iter)?;
+    let mint = next_account_info(account_info_iter)?;
+    let token_program = next_account_info(account_info_iter)?;
+
+    assert_writable(config)?;
+    assert_writable(reward_pool_token_account)?;
+    assert_writable(mint)?;
+    assert_owned_by(config, program_id)?;
+    assert_supported_token_program(token_program)?;
+
+    let mut arena_config = ArenaConfig::load(&config.data.borrow())?;
+    assert_config_pda(program_id, config, &arena_config)?;
+    if arena_config.mint != *mint.key
+        || arena_config.token_program != *token_program.key
+        || arena_config.reward_pool_token_account != *reward_pool_token_account.key
+    {
+        return Err(ArenaError::InvalidTokenMint.into());
+    }
+    if arena_config.total_locked != 0
+        || arena_config.eligible_locked != 0
+        || arena_config.warming_locked != 0
+        || arena_config.pending_activation_locked != 0
+        || arena_config.pending_rewards != 0
+    {
+        return Err(ArenaError::InvalidAmount.into());
+    }
+
+    let (expected_vault_authority, vault_authority_bump) =
+        Pubkey::find_program_address(&[VAULT_AUTHORITY_SEED, config.key.as_ref()], program_id);
+    if expected_vault_authority != *vault_authority.key {
+        return Err(ArenaError::InvalidPda.into());
+    }
+    assert_custody_token_account(
+        token_program,
+        reward_pool_token_account,
+        mint.key,
+        vault_authority.key,
+    )?;
+    burn_reward_pool_balance(
+        token_program,
+        reward_pool_token_account,
+        mint,
+        vault_authority,
+        &mut arena_config,
+        config.key,
+        vault_authority_bump,
+    )?;
     arena_config.store(&mut config.data.borrow_mut())
 }
 
@@ -1186,10 +1274,9 @@ fn burn_from_vault<'a>(
     )
 }
 
-/// Burn unallocated reward-pool tokens: unindexed `pending_rewards` and/or
-/// post-index `reward_dust`. Used when the arena has zero eligible stake.
+/// Burn the actual reward-pool token balance once the arena has no stake/debt.
 #[allow(clippy::too_many_arguments)]
-fn burn_unallocated_reward_pool<'a>(
+fn burn_reward_pool_balance<'a>(
     token_program: &AccountInfo<'a>,
     reward_pool_token_account: &AccountInfo<'a>,
     mint: &AccountInfo<'a>,
@@ -1198,10 +1285,9 @@ fn burn_unallocated_reward_pool<'a>(
     config_key: &Pubkey,
     vault_authority_bump: u8,
 ) -> ProgramResult {
-    let pending = arena_config.pending_rewards;
-    let dust = arena_config.reward_dust;
-    let expired = pending.checked_add(dust).ok_or(ArenaError::MathOverflow)?;
-    if expired == 0 {
+    let view = unpack_token_account(token_program.key, reward_pool_token_account)?;
+    let amount = view.amount;
+    if amount == 0 {
         return Ok(());
     }
 
@@ -1210,42 +1296,16 @@ fn burn_unallocated_reward_pool<'a>(
         reward_pool_token_account,
         mint,
         vault_authority,
-        expired,
+        amount,
         arena_config.decimals,
         config_key,
         vault_authority_bump,
     )?;
-    if pending > 0 {
-        expire_pending_rewards_accounting(arena_config)?;
-    }
-    if dust > 0 {
-        arena_config.reward_dust = 0;
-        arena_config.total_rewards_expired = sat_add_u64(arena_config.total_rewards_expired, dust);
-    }
-    arena_config.total_burned = sat_add_u64(arena_config.total_burned, expired);
+    arena_config.pending_rewards = 0;
+    arena_config.reward_dust = 0;
+    arena_config.total_rewards_expired = sat_add_u64(arena_config.total_rewards_expired, amount);
+    arena_config.total_burned = sat_add_u64(arena_config.total_burned, amount);
     Ok(())
-}
-
-/// Backward-compatible name used by withdraw path.
-#[allow(clippy::too_many_arguments)]
-fn burn_expired_pending_rewards<'a>(
-    token_program: &AccountInfo<'a>,
-    reward_pool_token_account: &AccountInfo<'a>,
-    mint: &AccountInfo<'a>,
-    vault_authority: &AccountInfo<'a>,
-    arena_config: &mut ArenaConfig,
-    config_key: &Pubkey,
-    vault_authority_bump: u8,
-) -> ProgramResult {
-    burn_unallocated_reward_pool(
-        token_program,
-        reward_pool_token_account,
-        mint,
-        vault_authority,
-        arena_config,
-        config_key,
-        vault_authority_bump,
-    )
 }
 
 fn process_claim_rewards(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
@@ -1302,13 +1362,17 @@ fn process_claim_rewards(program_id: &Pubkey, accounts: &[AccountInfo]) -> Progr
     if arena_position.locked_amount == 0 {
         return Err(ArenaError::InsufficientPositionBalance.into());
     }
+    let maturity_sync = arena_position.warming_amount > 0
+        && arena_config.current_epoch > arena_position.warming_epoch;
     mature_warming_if_ready(&mut arena_config, &mut arena_position)?;
     accrue_rewards(&arena_config, &mut arena_position)?;
     if arena_position.pending_rewards == 0 {
-        // Persist maturity even when there is nothing to claim yet.
-        arena_position.last_activity_ts = Clock::get()?.unix_timestamp;
-        arena_config.store(&mut config.data.borrow_mut())?;
-        arena_position.store(&mut position.data.borrow_mut())?;
+        if maturity_sync {
+            arena_position.last_activity_ts = Clock::get()?.unix_timestamp;
+            arena_config.store(&mut config.data.borrow_mut())?;
+            arena_position.store(&mut position.data.borrow_mut())?;
+            return Ok(());
+        }
         return Err(ArenaError::NoRewards.into());
     }
 
@@ -1373,6 +1437,7 @@ fn penalty_split(
     early_exit_penalty_bps: u16,
     burn_penalty_bps: u16,
     penalty_remainder: &mut u64,
+    burn_remainder: &mut u64,
 ) -> Result<(u64, u64), ProgramError> {
     if early_exit_penalty_bps == 0 {
         return Ok((0, 0));
@@ -1398,14 +1463,27 @@ fn penalty_split(
     // Never confiscate more than the withdrawn amount.
     let penalty = penalty.min(amount);
 
-    let burn = if penalty > 0 && burn_penalty_bps > 0 {
-        let burn = penalty
-            .checked_mul(u64::from(burn_penalty_bps))
+    let burn = if burn_penalty_bps > 0 {
+        let scaled_burn = u128::from(amount)
+            .checked_mul(u128::from(burn_penalty_bps))
             .ok_or(ArenaError::MathOverflow)?
-            .checked_div(u64::from(early_exit_penalty_bps))
+            .checked_add(u128::from(*burn_remainder))
             .ok_or(ArenaError::MathOverflow)?;
+        let burn = u64::try_from(
+            scaled_burn
+                .checked_div(u128::from(BPS_DENOMINATOR))
+                .ok_or(ArenaError::MathOverflow)?,
+        )
+        .map_err(|_| ArenaError::MathOverflow)?;
+        *burn_remainder = u64::try_from(
+            scaled_burn
+                .checked_rem(u128::from(BPS_DENOMINATOR))
+                .ok_or(ArenaError::MathOverflow)?,
+        )
+        .map_err(|_| ArenaError::MathOverflow)?;
         burn.min(penalty)
     } else {
+        *burn_remainder = 0;
         0
     };
     let reward = penalty.checked_sub(burn).ok_or(ArenaError::MathOverflow)?;
@@ -1471,7 +1549,6 @@ fn reduce_position_stake(
         .ok_or(ArenaError::MathOverflow)?;
 
     if arena_position.locked_amount == 0 {
-        arena_position.penalty_remainder = 0;
         arena_position.reward_accrual_remainder = 0;
     }
     Ok(())
@@ -1566,11 +1643,6 @@ fn process_withdraw(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) 
         .eligible_locked
         .checked_sub(eligible_reduction)
         .ok_or(ArenaError::MathOverflow)?;
-    let warming_locked_after = arena_config
-        .warming_locked
-        .checked_sub(warming_reduction)
-        .ok_or(ArenaError::MathOverflow)?;
-
     accrue_rewards(&arena_config, &mut arena_position)?;
     if full_exit {
         pay_pending_rewards(
@@ -1594,27 +1666,20 @@ fn process_withdraw(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) 
                 arena_config.early_exit_penalty_bps,
                 arena_config.burn_penalty_bps,
                 &mut arena_position.penalty_remainder,
+                &mut arena_position.burn_remainder,
             )?
         } else {
             // Past unlock: clear remainder so it cannot apply after lock ends.
             arena_position.penalty_remainder = 0;
+            arena_position.burn_remainder = 0;
             (0, 0)
         };
-    // Empty mature arena (no remaining mature or warming stake) burns unallocated pool.
-    if eligible_locked_after == 0 && warming_locked_after == 0 {
+    // No mature denominator remains, so redistribution would be snipeable.
+    if eligible_locked_after == 0 {
         burned = burned
             .checked_add(reward_penalty)
             .ok_or(ArenaError::MathOverflow)?;
         reward_penalty = 0;
-        burn_expired_pending_rewards(
-            token_program,
-            reward_pool_token_account,
-            mint,
-            vault_authority,
-            &mut arena_config,
-            config.key,
-            vault_authority_bump,
-        )?;
     }
     let penalty = reward_penalty
         .checked_add(burned)
@@ -1661,6 +1726,7 @@ fn process_withdraw(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) 
         config.key,
         vault_authority_bump,
     )?;
+    try_commit_rewards_to_index(&mut arena_config, reward_penalty, eligible_locked_after)?;
 
     reduce_position_stake(&mut arena_config, &mut arena_position, amount)?;
 
@@ -1669,10 +1735,6 @@ fn process_withdraw(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) 
     arena_position.total_burned = sat_add_u64(arena_position.total_burned, burned);
     arena_position.last_activity_ts = now;
 
-    arena_config.pending_rewards = arena_config
-        .pending_rewards
-        .checked_add(reward_penalty)
-        .ok_or(ArenaError::MathOverflow)?;
     arena_config.total_penalties_collected =
         sat_add_u64(arena_config.total_penalties_collected, penalty);
     arena_config.total_burned = sat_add_u64(arena_config.total_burned, burned);
@@ -1688,14 +1750,37 @@ mod unit_tests {
     #[test]
     fn cumulative_penalty_matches_bulk_for_fifty_percent() {
         let mut rem = 0u64;
-        let (r1, b1) = penalty_split(1, 5_000, 0, &mut rem).unwrap();
+        let mut burn_rem = 0u64;
+        let (r1, b1) = penalty_split(1, 5_000, 0, &mut rem, &mut burn_rem).unwrap();
         assert_eq!((r1, b1, rem), (0, 0, 5_000));
-        let (r2, b2) = penalty_split(1, 5_000, 0, &mut rem).unwrap();
+        let (r2, b2) = penalty_split(1, 5_000, 0, &mut rem, &mut burn_rem).unwrap();
         assert_eq!((r2, b2, rem), (1, 0, 0));
 
         let mut rem_bulk = 0u64;
-        let (rb, bb) = penalty_split(2, 5_000, 0, &mut rem_bulk).unwrap();
+        let mut burn_rem_bulk = 0u64;
+        let (rb, bb) = penalty_split(2, 5_000, 0, &mut rem_bulk, &mut burn_rem_bulk).unwrap();
         assert_eq!((rb, bb), (1, 0));
         assert_eq!(r1 + r2, rb);
+    }
+
+    #[test]
+    fn cumulative_burn_matches_bulk_for_small_splits() {
+        let mut penalty_rem = 0u64;
+        let mut burn_rem = 0u64;
+        let mut reward_total = 0u64;
+        let mut burn_total = 0u64;
+        for _ in 0..10 {
+            let (reward, burn) =
+                penalty_split(10, 1_000, 100, &mut penalty_rem, &mut burn_rem).unwrap();
+            reward_total += reward;
+            burn_total += burn;
+        }
+
+        let mut bulk_penalty_rem = 0u64;
+        let mut bulk_burn_rem = 0u64;
+        let (bulk_reward, bulk_burn) =
+            penalty_split(100, 1_000, 100, &mut bulk_penalty_rem, &mut bulk_burn_rem).unwrap();
+        assert_eq!((reward_total, burn_total), (bulk_reward, bulk_burn));
+        assert_eq!((bulk_reward, bulk_burn), (9, 1));
     }
 }

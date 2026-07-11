@@ -4,13 +4,13 @@
 
 Pump.fun mints are **Token-2022** with **metadata** extensions.
 
-- Old immutable program `AV4FTAiteCN75iq6QbuPTuh2PVL4FKwyiWJiowhhzAsQ` **rejects all** Token-2022 extensions → **cannot** init arena against a pump mint.
-- New **pump-compatible** build allowlists only:
+- Old immutable program `AV4FTAiteCN75iq6QbuPTuh2PVL4FKwyiWJiowhhzAsQ` is not the final target for Pump.fun mainnet.
+- New **pump-compatible v2** build allowlists only:
   - Mint: `MetadataPointer`, `TokenMetadata`
   - Account: `ImmutableOwner`
   - Still rejects transfer hooks, transfer fees, permanent delegate, etc.
 
-**Devnet program id (pump-compatible, still upgradeable until you freeze):**
+**Devnet program id previously used for pump-compatible testing (verify before reuse; deploy a fresh v2 build for final testing):**
 
 ```text
 Ac9fhZ2ZC19p7KEXtebhRweaqSEsuguSAXXnFNr1ML75
@@ -20,7 +20,7 @@ Ac9fhZ2ZC19p7KEXtebhRweaqSEsuguSAXXnFNr1ML75
 
 ```
 1) Launch coin on Pump.fun  → get mint address
-2) Deploy/confirm program   → Ac9fh… (devnet) or NEW mainnet deploy
+2) Deploy/confirm v2 program → fresh devnet/mainnet program id
 3) Initialize arena config  → vault + reward pool for that mint
 4) Pin site .env.production → live mode
 5) Cloudflare deploy
@@ -71,6 +71,7 @@ export PUBLIC_TOKEN_MINT=<pump mint>
 export PUBLIC_ARENA_PROGRAM_ID=Ac9fhZ2ZC19p7KEXtebhRweaqSEsuguSAXXnFNr1ML75  # or mainnet id
 export SOLANA_RPC_URL="https://mainnet.helius-rpc.com/?api-key=$HELIUS_API_KEY"
 export PUBLIC_SOLANA_CLUSTER=mainnet-beta
+export PUBLIC_ARENA_MIN_DEPOSIT_AMOUNT=1  # token units, converted to raw units by the script
 export DEVNET_PAYER_KEYPAIR=...
 
 bun scripts/post-pump-launch.mjs
