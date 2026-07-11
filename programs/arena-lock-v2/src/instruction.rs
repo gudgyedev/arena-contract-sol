@@ -134,15 +134,23 @@ pub fn activate_position(
     authority: Pubkey,
     config_id: u64,
     owner: Pubkey,
+    reward_pool_token_account: Pubkey,
+    mint: Pubkey,
+    token_program: Pubkey,
 ) -> Instruction {
     let (config, _) = config_pda(&program_id, &authority, config_id);
     let (position, _) = position_pda(&program_id, &config, &owner);
+    let (vault_authority, _) = vault_authority_pda(&program_id, &config);
     Instruction {
         program_id,
         accounts: vec![
             AccountMeta::new(owner, true),
             AccountMeta::new(config, false),
             AccountMeta::new(position, false),
+            AccountMeta::new(reward_pool_token_account, false),
+            AccountMeta::new_readonly(vault_authority, false),
+            AccountMeta::new(mint, false),
+            AccountMeta::new_readonly(token_program, false),
         ],
         data: borsh::to_vec(&ArenaInstruction::ActivatePosition)
             .expect("serialize activate position"),
@@ -177,11 +185,25 @@ pub fn fund_rewards(
     }
 }
 
-pub fn roll_epoch(program_id: Pubkey, authority: Pubkey, config_id: u64) -> Instruction {
+pub fn roll_epoch(
+    program_id: Pubkey,
+    authority: Pubkey,
+    config_id: u64,
+    reward_pool_token_account: Pubkey,
+    mint: Pubkey,
+    token_program: Pubkey,
+) -> Instruction {
     let (config, _) = config_pda(&program_id, &authority, config_id);
+    let (vault_authority, _) = vault_authority_pda(&program_id, &config);
     Instruction {
         program_id,
-        accounts: vec![AccountMeta::new(config, false)],
+        accounts: vec![
+            AccountMeta::new(config, false),
+            AccountMeta::new(reward_pool_token_account, false),
+            AccountMeta::new_readonly(vault_authority, false),
+            AccountMeta::new(mint, false),
+            AccountMeta::new_readonly(token_program, false),
+        ],
         data: borsh::to_vec(&ArenaInstruction::RollEpoch).expect("serialize roll epoch"),
     }
 }

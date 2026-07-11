@@ -119,6 +119,85 @@ impl TokenFlavor {
             .unwrap(),
         }
     }
+
+    fn revoke_mint_authority(self, mint: &Pubkey, authority: &Pubkey) -> Instruction {
+        match self {
+            Self::Spl => spl_token::instruction::set_authority(
+                &self.program_id(),
+                mint,
+                None,
+                spl_token::instruction::AuthorityType::MintTokens,
+                authority,
+                &[],
+            )
+            .unwrap(),
+            Self::Token2022 => spl_token_2022::instruction::set_authority(
+                &self.program_id(),
+                mint,
+                None,
+                spl_token_2022::instruction::AuthorityType::MintTokens,
+                authority,
+                &[],
+            )
+            .unwrap(),
+        }
+    }
+
+    fn set_account_owner(
+        self,
+        account: &Pubkey,
+        new_owner: &Pubkey,
+        current_owner: &Pubkey,
+    ) -> Instruction {
+        match self {
+            Self::Spl => spl_token::instruction::set_authority(
+                &self.program_id(),
+                account,
+                Some(new_owner),
+                spl_token::instruction::AuthorityType::AccountOwner,
+                current_owner,
+                &[],
+            )
+            .unwrap(),
+            Self::Token2022 => spl_token_2022::instruction::set_authority(
+                &self.program_id(),
+                account,
+                Some(new_owner),
+                spl_token_2022::instruction::AuthorityType::AccountOwner,
+                current_owner,
+                &[],
+            )
+            .unwrap(),
+        }
+    }
+
+    fn set_close_authority(
+        self,
+        account: &Pubkey,
+        close_authority: &Pubkey,
+        current_owner: &Pubkey,
+    ) -> Instruction {
+        match self {
+            Self::Spl => spl_token::instruction::set_authority(
+                &self.program_id(),
+                account,
+                Some(close_authority),
+                spl_token::instruction::AuthorityType::CloseAccount,
+                current_owner,
+                &[],
+            )
+            .unwrap(),
+            Self::Token2022 => spl_token_2022::instruction::set_authority(
+                &self.program_id(),
+                account,
+                Some(close_authority),
+                spl_token_2022::instruction::AuthorityType::CloseAccount,
+                current_owner,
+                &[],
+            )
+            .unwrap(),
+        }
+    }
 }
 
 async fn start() -> ProgramTestContext {
@@ -275,6 +354,20 @@ async fn mint_to_account(
     .await;
 }
 
+async fn revoke_mint_authority(
+    context: &mut ProgramTestContext,
+    flavor: TokenFlavor,
+    mint: &Pubkey,
+) {
+    let authority = context.payer.pubkey();
+    process_tx(
+        context,
+        &[],
+        vec![flavor.revoke_mint_authority(mint, &authority)],
+    )
+    .await;
+}
+
 async fn token_balance(
     context: &mut ProgramTestContext,
     flavor: TokenFlavor,
@@ -421,6 +514,7 @@ async fn setup_arena(
         USER_STARTING_TOKENS,
     )
     .await;
+    revoke_mint_authority(&mut context, flavor, &mint.pubkey()).await;
 
     process_tx(
         &mut context,
@@ -476,7 +570,14 @@ async fn rejects_program_owned_config_at_wrong_pda() {
         .context
         .set_account(&fake_config_key, &fake_config_account);
 
-    let mut ix = roll_epoch(id(), fixture.authority.pubkey(), fixture.config_id);
+    let mut ix = roll_epoch(
+        id(),
+        fixture.authority.pubkey(),
+        fixture.config_id,
+        fixture.reward_pool_token.pubkey(),
+        fixture.mint.pubkey(),
+        flavor.program_id(),
+    );
     ix.accounts[0].pubkey = fake_config_key;
     process_tx_expect_err(&mut fixture.context, &[], vec![ix]).await;
 }
@@ -539,6 +640,9 @@ async fn rejects_program_owned_position_at_wrong_pda() {
         fixture.authority.pubkey(),
         fixture.config_id,
         fixture.user.pubkey(),
+        fixture.reward_pool_token.pubkey(),
+        fixture.mint.pubkey(),
+        flavor.program_id(),
     );
     ix.accounts[2].pubkey = fake_position_key;
     process_tx_expect_err(&mut fixture.context, &[&fixture.user], vec![ix]).await;
@@ -719,6 +823,9 @@ async fn activation_epoch_roll_and_claim_rewards() {
             fixture.authority.pubkey(),
             fixture.config_id,
             fixture.user.pubkey(),
+            fixture.reward_pool_token.pubkey(),
+            fixture.mint.pubkey(),
+            flavor.program_id(),
         )],
     )
     .await;
@@ -732,6 +839,9 @@ async fn activation_epoch_roll_and_claim_rewards() {
             fixture.authority.pubkey(),
             fixture.config_id,
             fixture.user.pubkey(),
+            fixture.reward_pool_token.pubkey(),
+            fixture.mint.pubkey(),
+            flavor.program_id(),
         )],
     )
     .await;
@@ -763,6 +873,9 @@ async fn activation_epoch_roll_and_claim_rewards() {
             id(),
             fixture.authority.pubkey(),
             fixture.config_id,
+            fixture.reward_pool_token.pubkey(),
+            fixture.mint.pubkey(),
+            flavor.program_id(),
         )],
     )
     .await;
@@ -833,6 +946,9 @@ async fn early_exit_splits_penalty_between_rewards_and_burn() {
             fixture.authority.pubkey(),
             fixture.config_id,
             fixture.user.pubkey(),
+            fixture.reward_pool_token.pubkey(),
+            fixture.mint.pubkey(),
+            flavor.program_id(),
         )],
     )
     .await;
@@ -915,6 +1031,9 @@ async fn early_exit_with_no_remaining_eligible_burns_full_penalty() {
             fixture.authority.pubkey(),
             fixture.config_id,
             fixture.user.pubkey(),
+            fixture.reward_pool_token.pubkey(),
+            fixture.mint.pubkey(),
+            flavor.program_id(),
         )],
     )
     .await;
@@ -1009,6 +1128,9 @@ async fn full_exit_settles_rewards_and_leaves_no_post_exit_claim() {
             fixture.authority.pubkey(),
             fixture.config_id,
             fixture.user.pubkey(),
+            fixture.reward_pool_token.pubkey(),
+            fixture.mint.pubkey(),
+            flavor.program_id(),
         )],
     )
     .await;
@@ -1035,6 +1157,9 @@ async fn full_exit_settles_rewards_and_leaves_no_post_exit_claim() {
             id(),
             fixture.authority.pubkey(),
             fixture.config_id,
+            fixture.reward_pool_token.pubkey(),
+            fixture.mint.pubkey(),
+            flavor.program_id(),
         )],
     )
     .await;
@@ -1137,6 +1262,9 @@ async fn token_2022_plain_accounts_support_burn_and_reward_pool_path() {
             fixture.authority.pubkey(),
             fixture.config_id,
             fixture.user.pubkey(),
+            fixture.reward_pool_token.pubkey(),
+            fixture.mint.pubkey(),
+            flavor.program_id(),
         )],
     )
     .await;
@@ -1228,6 +1356,70 @@ async fn rejects_burn_share_above_total_penalty() {
 }
 
 #[tokio::test]
+async fn rejects_mint_with_mint_authority() {
+    let flavor = TokenFlavor::Spl;
+    let mut context = start().await;
+    let authority = Keypair::new();
+    let user = Keypair::new();
+    let mint = Keypair::new();
+    let user_token = Keypair::new();
+    let vault_token = Keypair::new();
+    let reward_pool_token = Keypair::new();
+    let config_id = 8;
+
+    fund(&mut context, &authority.pubkey(), LAMPORTS_PER_SOL).await;
+    let (config, _) = config_pda(&id(), &authority.pubkey(), config_id);
+    let (vault_authority, _) = vault_authority_pda(&id(), &config);
+    create_mint_and_account(
+        &mut context,
+        flavor,
+        &mint,
+        &user.pubkey(),
+        &user_token,
+        DECIMALS,
+    )
+    .await;
+    create_token_account(
+        &mut context,
+        flavor,
+        &mint.pubkey(),
+        &vault_authority,
+        &vault_token,
+    )
+    .await;
+    create_token_account(
+        &mut context,
+        flavor,
+        &mint.pubkey(),
+        &vault_authority,
+        &reward_pool_token,
+    )
+    .await;
+
+    process_tx_expect_err(
+        &mut context,
+        &[&authority],
+        vec![initialize_config(
+            id(),
+            authority.pubkey(),
+            config_id,
+            1_000,
+            10,
+            10,
+            100,
+            1_000,
+            100,
+            mint.pubkey(),
+            vault_token.pubkey(),
+            reward_pool_token.pubkey(),
+            flavor.program_id(),
+            DECIMALS,
+        )],
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn rejects_mint_with_freeze_authority() {
     let flavor = TokenFlavor::Spl;
     let mut context = start().await;
@@ -1304,4 +1496,203 @@ async fn rejects_mint_with_freeze_authority() {
         )],
     )
     .await;
+}
+
+#[tokio::test]
+async fn rejects_custody_token_account_with_close_authority() {
+    let flavor = TokenFlavor::Spl;
+    let mut context = start().await;
+    let authority = Keypair::new();
+    let user = Keypair::new();
+    let temp_owner = Keypair::new();
+    let close_authority = Keypair::new();
+    let mint = Keypair::new();
+    let user_token = Keypair::new();
+    let vault_token = Keypair::new();
+    let reward_pool_token = Keypair::new();
+    let config_id = 10;
+
+    fund(&mut context, &authority.pubkey(), LAMPORTS_PER_SOL).await;
+    let (config, _) = config_pda(&id(), &authority.pubkey(), config_id);
+    let (vault_authority, _) = vault_authority_pda(&id(), &config);
+    create_mint_and_account(
+        &mut context,
+        flavor,
+        &mint,
+        &user.pubkey(),
+        &user_token,
+        DECIMALS,
+    )
+    .await;
+    create_token_account(
+        &mut context,
+        flavor,
+        &mint.pubkey(),
+        &temp_owner.pubkey(),
+        &vault_token,
+    )
+    .await;
+    create_token_account(
+        &mut context,
+        flavor,
+        &mint.pubkey(),
+        &vault_authority,
+        &reward_pool_token,
+    )
+    .await;
+    process_tx(
+        &mut context,
+        &[&temp_owner],
+        vec![
+            flavor.set_close_authority(
+                &vault_token.pubkey(),
+                &close_authority.pubkey(),
+                &temp_owner.pubkey(),
+            ),
+            flavor.set_account_owner(
+                &vault_token.pubkey(),
+                &vault_authority,
+                &temp_owner.pubkey(),
+            ),
+        ],
+    )
+    .await;
+    revoke_mint_authority(&mut context, flavor, &mint.pubkey()).await;
+
+    process_tx_expect_err(
+        &mut context,
+        &[&authority],
+        vec![initialize_config(
+            id(),
+            authority.pubkey(),
+            config_id,
+            1_000,
+            10,
+            10,
+            100,
+            1_000,
+            100,
+            mint.pubkey(),
+            vault_token.pubkey(),
+            reward_pool_token.pubkey(),
+            flavor.program_id(),
+            DECIMALS,
+        )],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn deposit_extends_unlock_without_shortening_existing_lock() {
+    let flavor = TokenFlavor::Spl;
+    // min_lock=100s, activation=10s
+    let mut fixture = setup_arena(flavor, 20, 1_000, 100, 10, 1_000, 100).await;
+    let first = 1_000_000u64;
+    let second = 100_000u64;
+
+    process_tx(
+        &mut fixture.context,
+        &[&fixture.user],
+        vec![deposit(
+            id(),
+            fixture.authority.pubkey(),
+            fixture.config_id,
+            fixture.user.pubkey(),
+            fixture.user_token.pubkey(),
+            fixture.vault_token.pubkey(),
+            fixture.mint.pubkey(),
+            flavor.program_id(),
+            first,
+        )],
+    )
+    .await;
+
+    let after_first = load_position(&mut fixture.context, fixture.position).await;
+    let first_unlock = after_first.unlock_ts;
+    assert!(first_unlock > 0);
+
+    // Near the end of the lock window, top up with a shorter residual would
+    // previously reset unlock to now+min_lock and could shorten relative to
+    // a longer remaining lock. Advance only 10s so remaining lock is still long.
+    advance_time(&mut fixture.context, 10).await;
+
+    process_tx(
+        &mut fixture.context,
+        &[&fixture.user],
+        vec![deposit(
+            id(),
+            fixture.authority.pubkey(),
+            fixture.config_id,
+            fixture.user.pubkey(),
+            fixture.user_token.pubkey(),
+            fixture.vault_token.pubkey(),
+            fixture.mint.pubkey(),
+            flavor.program_id(),
+            second,
+        )],
+    )
+    .await;
+
+    let after_second = load_position(&mut fixture.context, fixture.position).await;
+    assert_eq!(after_second.lock_start_ts, after_first.lock_start_ts);
+    assert!(
+        after_second.unlock_ts >= first_unlock,
+        "top-up must not shorten unlock_ts (was {first_unlock}, now {})",
+        after_second.unlock_ts
+    );
+    assert_eq!(after_second.locked_amount, first + second);
+    assert_eq!(after_second.pending_activation_amount, first + second);
+}
+
+#[tokio::test]
+async fn tiny_early_exit_with_floor_penalty_returns_principal() {
+    let flavor = TokenFlavor::Spl;
+    // min_deposit in setup is 100; use 50% early exit bps so floor(1 * 5000/10000)=0
+    let mut fixture = setup_arena(flavor, 21, 1_000, 10, 10, 5_000, 1_000).await;
+    let deposit_amount = 100u64;
+    let withdraw_amount = 1u64;
+
+    process_tx(
+        &mut fixture.context,
+        &[&fixture.user],
+        vec![deposit(
+            id(),
+            fixture.authority.pubkey(),
+            fixture.config_id,
+            fixture.user.pubkey(),
+            fixture.user_token.pubkey(),
+            fixture.vault_token.pubkey(),
+            fixture.mint.pubkey(),
+            flavor.program_id(),
+            deposit_amount,
+        )],
+    )
+    .await;
+
+    // Early exit 1 unit before unlock — floor penalty is 0, full unit returned
+    process_tx(
+        &mut fixture.context,
+        &[&fixture.user],
+        vec![withdraw(
+            id(),
+            fixture.authority.pubkey(),
+            fixture.config_id,
+            fixture.user.pubkey(),
+            fixture.user_token.pubkey(),
+            fixture.vault_token.pubkey(),
+            fixture.reward_pool_token.pubkey(),
+            fixture.mint.pubkey(),
+            flavor.program_id(),
+            withdraw_amount,
+        )],
+    )
+    .await;
+
+    let position = load_position(&mut fixture.context, fixture.position).await;
+    assert_eq!(position.locked_amount, deposit_amount - withdraw_amount);
+    assert_eq!(position.total_penalty_paid, 0);
+    assert_eq!(
+        token_balance(&mut fixture.context, flavor, fixture.user_token.pubkey()).await,
+        USER_STARTING_TOKENS - deposit_amount + withdraw_amount
+    );
 }

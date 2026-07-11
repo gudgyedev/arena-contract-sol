@@ -26,9 +26,19 @@ AV4FTAiteCN75iq6QbuPTuh2PVL4FKwyiWJiowhhzAsQ
 ## Build And Test
 
 ```bash
+NO_DNA=1 cargo fmt --check
 NO_DNA=1 cargo test -p arena-lock-v2
+NO_DNA=1 cargo clippy -p arena-lock-v2 --all-targets --all-features -- -D warnings
 NO_DNA=1 cargo build-sbf --manifest-path programs/arena-lock-v2/Cargo.toml
 ```
+
+For the full pre-audit gate:
+
+```bash
+scripts/readiness-check.sh
+```
+
+See `docs/AUDIT_PACKAGE.md` for the required external-review package, launch preconditions, and acceptance bar.
 
 ## Status
 

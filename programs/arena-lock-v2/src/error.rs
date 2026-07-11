@@ -41,6 +41,8 @@ pub enum ArenaError {
     InvalidTokenAccount,
     #[error("Math overflow")]
     MathOverflow,
+    #[error("Account is not writable")]
+    AccountNotWritable,
 }
 
 impl From<ArenaError> for ProgramError {

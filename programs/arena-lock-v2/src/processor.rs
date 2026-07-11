@@ -5,13 +5,14 @@ use solana_program::{
     entrypoint::ProgramResult,
     program::{invoke, invoke_signed},
     program_error::ProgramError,
+    program_option::COption,
     program_pack::Pack,
     pubkey::Pubkey,
     rent::Rent,
     system_instruction, system_program,
     sysvar::Sysvar,
 };
-use spl_token_2022::extension::{BaseStateWithExtensions, StateWithExtensions};
+use spl_token_2022::extension::{BaseStateWithExtensions, ExtensionType, StateWithExtensions};
 
 use crate::{
     error::ArenaError,
@@ -23,6 +24,38 @@ use crate::{
 };
 
 const BPS_DENOMINATOR: u64 = 10_000;
+
+/// Pump.fun and many meme mints use Token-2022 metadata extensions.
+/// Allow only cosmetic / non-transfer-affecting mint extensions.
+fn is_allowed_mint_extension(ext: ExtensionType) -> bool {
+    matches!(
+        ext,
+        ExtensionType::MetadataPointer | ExtensionType::TokenMetadata
+    )
+}
+
+/// ATAs often carry ImmutableOwner; reject transfer hooks / fee / permanent delegate.
+fn is_allowed_account_extension(ext: ExtensionType) -> bool {
+    matches!(ext, ExtensionType::ImmutableOwner)
+}
+
+fn assert_allowed_mint_extensions(exts: &[ExtensionType]) -> ProgramResult {
+    for ext in exts {
+        if !is_allowed_mint_extension(*ext) {
+            return Err(ArenaError::InvalidTokenMint.into());
+        }
+    }
+    Ok(())
+}
+
+fn assert_allowed_account_extensions(exts: &[ExtensionType]) -> ProgramResult {
+    for ext in exts {
+        if !is_allowed_account_extension(*ext) {
+            return Err(ArenaError::InvalidTokenAccount.into());
+        }
+    }
+    Ok(())
+}
 
 pub fn process_instruction(
     program_id: &Pubkey,
@@ -68,6 +101,13 @@ pub fn process_instruction(
 fn assert_signer(account: &AccountInfo) -> ProgramResult {
     if !account.is_signer {
         return Err(ArenaError::InvalidSigner.into());
+    }
+    Ok(())
+}
+
+fn assert_writable(account: &AccountInfo) -> ProgramResult {
+    if !account.is_writable {
+        return Err(ArenaError::AccountNotWritable.into());
     }
     Ok(())
 }
@@ -205,6 +245,16 @@ fn burn_checked_ix(
 struct TokenAccountView {
     mint: Pubkey,
     owner: Pubkey,
+    is_initialized: bool,
+    is_native: bool,
+    is_frozen: bool,
+    has_delegate: bool,
+    delegated_amount: u64,
+    has_close_authority: bool,
+}
+
+fn coption_is_some<T>(value: &COption<T>) -> bool {
+    matches!(value, COption::Some(_))
 }
 
 fn unpack_token_account(
@@ -220,22 +270,32 @@ fn unpack_token_account(
         Ok(TokenAccountView {
             mint: token_account.mint,
             owner: token_account.owner,
+            is_initialized: token_account.state == spl_token::state::AccountState::Initialized,
+            is_native: coption_is_some(&token_account.is_native),
+            is_frozen: token_account.is_frozen(),
+            has_delegate: coption_is_some(&token_account.delegate),
+            delegated_amount: token_account.delegated_amount,
+            has_close_authority: coption_is_some(&token_account.close_authority),
         })
     } else if *token_program == spl_token_2022::id() {
         let account_data = account.data.borrow();
         let token_account =
             StateWithExtensions::<spl_token_2022::state::Account>::unpack(&account_data)
                 .map_err(|_| ArenaError::InvalidTokenAccount)?;
-        if !token_account
+        let exts = token_account
             .get_extension_types()
-            .map_err(|_| ArenaError::InvalidTokenAccount)?
-            .is_empty()
-        {
-            return Err(ArenaError::InvalidTokenAccount.into());
-        }
+            .map_err(|_| ArenaError::InvalidTokenAccount)?;
+        assert_allowed_account_extensions(&exts)?;
         Ok(TokenAccountView {
             mint: token_account.base.mint,
             owner: token_account.base.owner,
+            is_initialized: token_account.base.state
+                == spl_token_2022::state::AccountState::Initialized,
+            is_native: coption_is_some(&token_account.base.is_native),
+            is_frozen: token_account.base.is_frozen(),
+            has_delegate: coption_is_some(&token_account.base.delegate),
+            delegated_amount: token_account.base.delegated_amount,
+            has_close_authority: coption_is_some(&token_account.base.close_authority),
         })
     } else {
         Err(ArenaError::InvalidTokenProgram.into())
@@ -249,6 +309,9 @@ fn mint_decimals(mint: &AccountInfo, token_program: &Pubkey) -> Result<u8, Progr
     if *token_program == spl_token::id() {
         let mint_state = spl_token::state::Mint::unpack(&mint.data.borrow())
             .map_err(|_| ArenaError::InvalidTokenMint)?;
+        if coption_is_some(&mint_state.mint_authority) {
+            return Err(ArenaError::InvalidTokenMint.into());
+        }
         if mint_state.freeze_authority.is_some() {
             return Err(ArenaError::InvalidTokenMint.into());
         }
@@ -257,11 +320,12 @@ fn mint_decimals(mint: &AccountInfo, token_program: &Pubkey) -> Result<u8, Progr
         let mint_data = mint.data.borrow();
         let mint_state = StateWithExtensions::<spl_token_2022::state::Mint>::unpack(&mint_data)
             .map_err(|_| ArenaError::InvalidTokenMint)?;
-        if !mint_state
+        let exts = mint_state
             .get_extension_types()
-            .map_err(|_| ArenaError::InvalidTokenMint)?
-            .is_empty()
-        {
+            .map_err(|_| ArenaError::InvalidTokenMint)?;
+        // Pump.fun: MetadataPointer + TokenMetadata OK; hooks/fees/permanent-delegate rejected.
+        assert_allowed_mint_extensions(&exts)?;
+        if coption_is_some(&mint_state.base.mint_authority) {
             return Err(ArenaError::InvalidTokenMint.into());
         }
         if mint_state.base.freeze_authority.is_some() {
@@ -284,6 +348,29 @@ fn assert_token_account(
         return Err(ArenaError::InvalidTokenMint.into());
     }
     if owner.is_some_and(|expected| view.owner != *expected) {
+        return Err(ArenaError::InvalidTokenAccount.into());
+    }
+    Ok(())
+}
+
+fn assert_custody_token_account(
+    token_program: &AccountInfo,
+    account: &AccountInfo,
+    mint: &Pubkey,
+    owner: &Pubkey,
+) -> ProgramResult {
+    let view = unpack_token_account(token_program.key, account)?;
+    if view.mint != *mint {
+        return Err(ArenaError::InvalidTokenMint.into());
+    }
+    if view.owner != *owner
+        || !view.is_initialized
+        || view.is_native
+        || view.is_frozen
+        || view.has_delegate
+        || view.delegated_amount != 0
+        || view.has_close_authority
+    {
         return Err(ArenaError::InvalidTokenAccount.into());
     }
     Ok(())
@@ -399,6 +486,8 @@ fn process_initialize_config(
     let system_program = next_account_info(account_info_iter)?;
 
     assert_signer(authority)?;
+    assert_writable(authority)?;
+    assert_writable(config)?;
     assert_uninitialized(config)?;
     assert_supported_token_program(token_program)?;
     assert_system_program(system_program)?;
@@ -425,17 +514,17 @@ fn process_initialize_config(
     if vault_token_account.key == reward_pool_token_account.key {
         return Err(ArenaError::InvalidTreasury.into());
     }
-    assert_token_account(
+    assert_custody_token_account(
         token_program,
         vault_token_account,
         mint.key,
-        Some(vault_authority.key),
+        vault_authority.key,
     )?;
-    assert_token_account(
+    assert_custody_token_account(
         token_program,
         reward_pool_token_account,
         mint.key,
-        Some(vault_authority.key),
+        vault_authority.key,
     )?;
 
     create_program_account(
@@ -501,6 +590,11 @@ fn process_deposit(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) -
     let system_program = next_account_info(account_info_iter)?;
 
     assert_signer(owner)?;
+    assert_writable(owner)?;
+    assert_writable(owner_token_account)?;
+    assert_writable(config)?;
+    assert_writable(position)?;
+    assert_writable(vault_token_account)?;
     assert_owned_by(config, program_id)?;
     assert_supported_token_program(token_program)?;
     assert_system_program(system_program)?;
@@ -536,11 +630,11 @@ fn process_deposit(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) -
         mint.key,
         Some(owner.key),
     )?;
-    assert_token_account(
+    assert_custody_token_account(
         token_program,
         vault_token_account,
         mint.key,
-        Some(vault_authority.key),
+        vault_authority.key,
     )?;
 
     if position.data_is_empty() {
@@ -612,6 +706,18 @@ fn process_deposit(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) -
         }
     };
 
+    // H1: do not reset the whole position clock on top-ups.
+    // - first stake sets lock_start / unlock / activation from now
+    // - later deposits only extend unlock if needed, and only delay activation for new pending
+    let had_locked = arena_position.locked_amount > 0;
+    let prior_pending = arena_position.pending_activation_amount;
+    let min_unlock = now
+        .checked_add(arena_config.min_lock_seconds)
+        .ok_or(ArenaError::MathOverflow)?;
+    let min_activation = now
+        .checked_add(arena_config.activation_delay_seconds)
+        .ok_or(ArenaError::MathOverflow)?;
+
     arena_position.locked_amount = arena_position
         .locked_amount
         .checked_add(amount)
@@ -624,13 +730,23 @@ fn process_deposit(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) -
         .total_deposited
         .checked_add(amount)
         .ok_or(ArenaError::MathOverflow)?;
-    arena_position.lock_start_ts = now;
-    arena_position.unlock_ts = now
-        .checked_add(arena_config.min_lock_seconds)
-        .ok_or(ArenaError::MathOverflow)?;
-    arena_position.activation_ts = now
-        .checked_add(arena_config.activation_delay_seconds)
-        .ok_or(ArenaError::MathOverflow)?;
+
+    if !had_locked {
+        arena_position.lock_start_ts = now;
+        arena_position.unlock_ts = min_unlock;
+        arena_position.activation_ts = min_activation;
+    } else {
+        if min_unlock > arena_position.unlock_ts {
+            arena_position.unlock_ts = min_unlock;
+        }
+        if prior_pending == 0 {
+            // Fresh pending slice after fully eligible stake
+            arena_position.activation_ts = min_activation;
+        } else if min_activation > arena_position.activation_ts {
+            // Pending activates as one bag — delay to cover the newest deposit
+            arena_position.activation_ts = min_activation;
+        }
+    }
     arena_position.last_activity_ts = now;
 
     arena_config.total_locked = arena_config
@@ -651,13 +767,39 @@ fn process_activate_position(program_id: &Pubkey, accounts: &[AccountInfo]) -> P
     let owner = next_account_info(account_info_iter)?;
     let config = next_account_info(account_info_iter)?;
     let position = next_account_info(account_info_iter)?;
+    // M2: always present so orphaned pending pool can be burned before first eligibility
+    let reward_pool_token_account = next_account_info(account_info_iter)?;
+    let vault_authority = next_account_info(account_info_iter)?;
+    let mint = next_account_info(account_info_iter)?;
+    let token_program = next_account_info(account_info_iter)?;
 
     assert_signer(owner)?;
+    assert_writable(config)?;
+    assert_writable(position)?;
     assert_owned_by(config, program_id)?;
     assert_owned_by(position, program_id)?;
+    assert_supported_token_program(token_program)?;
 
     let mut arena_config = ArenaConfig::load(&config.data.borrow())?;
     assert_config_pda(program_id, config, &arena_config)?;
+    if arena_config.mint != *mint.key
+        || arena_config.token_program != *token_program.key
+        || arena_config.reward_pool_token_account != *reward_pool_token_account.key
+    {
+        return Err(ArenaError::InvalidTokenMint.into());
+    }
+    let (expected_vault_authority, vault_authority_bump) =
+        Pubkey::find_program_address(&[VAULT_AUTHORITY_SEED, config.key.as_ref()], program_id);
+    if expected_vault_authority != *vault_authority.key {
+        return Err(ArenaError::InvalidPda.into());
+    }
+    assert_custody_token_account(
+        token_program,
+        reward_pool_token_account,
+        mint.key,
+        vault_authority.key,
+    )?;
+
     let mut arena_position = ArenaPosition::load(&position.data.borrow())?;
     if arena_position.config != *config.key || arena_position.owner != *owner.key {
         return Err(ArenaError::InvalidPda.into());
@@ -672,8 +814,19 @@ fn process_activate_position(program_id: &Pubkey, accounts: &[AccountInfo]) -> P
     }
 
     accrue_rewards(&arena_config, &mut arena_position)?;
-    if arena_config.eligible_locked == 0 {
-        expire_pending_rewards_accounting(&mut arena_config)?;
+    // Burn any orphaned pending pool before the first eligible stake can touch index math
+    if arena_config.eligible_locked == 0 && arena_config.pending_rewards > 0 {
+        assert_writable(reward_pool_token_account)?;
+        assert_writable(mint)?;
+        burn_expired_pending_rewards(
+            token_program,
+            reward_pool_token_account,
+            mint,
+            vault_authority,
+            &mut arena_config,
+            config.key,
+            vault_authority_bump,
+        )?;
     }
     let amount = arena_position.pending_activation_amount;
     arena_position.pending_activation_amount = 0;
@@ -714,6 +867,9 @@ fn process_fund_rewards(
     let token_program = next_account_info(account_info_iter)?;
 
     assert_signer(funder)?;
+    assert_writable(funder_token_account)?;
+    assert_writable(config)?;
+    assert_writable(reward_pool_token_account)?;
     assert_owned_by(config, program_id)?;
     assert_supported_token_program(token_program)?;
 
@@ -736,11 +892,11 @@ fn process_fund_rewards(
         mint.key,
         Some(funder.key),
     )?;
-    assert_token_account(
+    assert_custody_token_account(
         token_program,
         reward_pool_token_account,
         mint.key,
-        Some(&vault_authority),
+        &vault_authority,
     )?;
 
     let ix = transfer_checked_ix(
@@ -777,11 +933,36 @@ fn process_fund_rewards(
 fn process_roll_epoch(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     let account_info_iter = &mut accounts.iter();
     let config = next_account_info(account_info_iter)?;
+    // M2: burn path accounts when empty arena still has pending pool tokens
+    let reward_pool_token_account = next_account_info(account_info_iter)?;
+    let vault_authority = next_account_info(account_info_iter)?;
+    let mint = next_account_info(account_info_iter)?;
+    let token_program = next_account_info(account_info_iter)?;
 
+    assert_writable(config)?;
     assert_owned_by(config, program_id)?;
+    assert_supported_token_program(token_program)?;
 
     let mut arena_config = ArenaConfig::load(&config.data.borrow())?;
     assert_config_pda(program_id, config, &arena_config)?;
+    if arena_config.mint != *mint.key
+        || arena_config.token_program != *token_program.key
+        || arena_config.reward_pool_token_account != *reward_pool_token_account.key
+    {
+        return Err(ArenaError::InvalidTokenMint.into());
+    }
+    let (expected_vault_authority, vault_authority_bump) =
+        Pubkey::find_program_address(&[VAULT_AUTHORITY_SEED, config.key.as_ref()], program_id);
+    if expected_vault_authority != *vault_authority.key {
+        return Err(ArenaError::InvalidPda.into());
+    }
+    assert_custody_token_account(
+        token_program,
+        reward_pool_token_account,
+        mint.key,
+        vault_authority.key,
+    )?;
+
     let now = Clock::get()?.unix_timestamp;
     let next_epoch_ts = arena_config
         .last_epoch_ts
@@ -792,7 +973,17 @@ fn process_roll_epoch(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramR
     }
 
     if arena_config.pending_rewards > 0 && arena_config.eligible_locked == 0 {
-        expire_pending_rewards_accounting(&mut arena_config)?;
+        assert_writable(reward_pool_token_account)?;
+        assert_writable(mint)?;
+        burn_expired_pending_rewards(
+            token_program,
+            reward_pool_token_account,
+            mint,
+            vault_authority,
+            &mut arena_config,
+            config.key,
+            vault_authority_bump,
+        )?;
     } else if arena_config.pending_rewards > 0 {
         let delta_index = u128::from(arena_config.pending_rewards)
             .checked_mul(REWARD_INDEX_SCALE)
@@ -953,6 +1144,10 @@ fn process_claim_rewards(program_id: &Pubkey, accounts: &[AccountInfo]) -> Progr
     let token_program = next_account_info(account_info_iter)?;
 
     assert_signer(owner)?;
+    assert_writable(owner_token_account)?;
+    assert_writable(config)?;
+    assert_writable(position)?;
+    assert_writable(reward_pool_token_account)?;
     assert_owned_by(config, program_id)?;
     assert_owned_by(position, program_id)?;
     assert_supported_token_program(token_program)?;
@@ -976,11 +1171,11 @@ fn process_claim_rewards(program_id: &Pubkey, accounts: &[AccountInfo]) -> Progr
         mint.key,
         Some(owner.key),
     )?;
-    assert_token_account(
+    assert_custody_token_account(
         token_program,
         reward_pool_token_account,
         mint.key,
-        Some(vault_authority.key),
+        vault_authority.key,
     )?;
 
     let mut arena_position = ArenaPosition::load(&position.data.borrow())?;
@@ -1063,10 +1258,10 @@ fn penalty_split(
     if early_exit_penalty_bps == 0 {
         return Ok((0, 0));
     }
+    // Floor division so tiny early exits never round up to a full confiscation
+    // (returned == 0 / softAmount trap). Dust stays with the user until unlock.
     let penalty = amount
         .checked_mul(u64::from(early_exit_penalty_bps))
-        .ok_or(ArenaError::MathOverflow)?
-        .checked_add(BPS_DENOMINATOR - 1)
         .ok_or(ArenaError::MathOverflow)?
         .checked_div(BPS_DENOMINATOR)
         .ok_or(ArenaError::MathOverflow)?;
@@ -1076,7 +1271,7 @@ fn penalty_split(
             .ok_or(ArenaError::MathOverflow)?
             .checked_div(u64::from(early_exit_penalty_bps))
             .ok_or(ArenaError::MathOverflow)?;
-        burn.max(1).min(penalty)
+        burn.min(penalty)
     } else {
         0
     };
@@ -1143,6 +1338,12 @@ fn process_withdraw(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) 
     let token_program = next_account_info(account_info_iter)?;
 
     assert_signer(owner)?;
+    assert_writable(owner_token_account)?;
+    assert_writable(config)?;
+    assert_writable(position)?;
+    assert_writable(vault_token_account)?;
+    assert_writable(reward_pool_token_account)?;
+    assert_writable(mint)?;
     assert_owned_by(config, program_id)?;
     assert_owned_by(position, program_id)?;
     assert_supported_token_program(token_program)?;
@@ -1172,17 +1373,17 @@ fn process_withdraw(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) 
         mint.key,
         Some(owner.key),
     )?;
-    assert_token_account(
+    assert_custody_token_account(
         token_program,
         vault_token_account,
         mint.key,
-        Some(vault_authority.key),
+        vault_authority.key,
     )?;
-    assert_token_account(
+    assert_custody_token_account(
         token_program,
         reward_pool_token_account,
         mint.key,
-        Some(vault_authority.key),
+        vault_authority.key,
     )?;
 
     let mut arena_position = ArenaPosition::load(&position.data.borrow())?;
