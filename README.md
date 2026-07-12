@@ -22,16 +22,16 @@ This repository intentionally contains only the arena contract we have been work
 Current devnet program id:
 
 ```text
-AV4FTAiteCN75iq6QbuPTuh2PVL4FKwyiWJiowhhzAsQ
+At5K4wSgzNawzGGYMzMHNXUxtJ3yjU6gbgbj8MpSBMUz
 ```
 
 ## Build And Test
 
 ```bash
 NO_DNA=1 cargo fmt --check
-NO_DNA=1 cargo test -p arena-lock-v2
-NO_DNA=1 cargo clippy -p arena-lock-v2 --all-targets --all-features -- -D warnings
-NO_DNA=1 cargo build-sbf --manifest-path programs/arena-lock-v2/Cargo.toml
+NO_DNA=1 cargo test --locked -p arena-lock-v2
+NO_DNA=1 cargo clippy --locked -p arena-lock-v2 --all-targets --all-features -- -D warnings
+NO_DNA=1 cargo build-sbf --manifest-path programs/arena-lock-v2/Cargo.toml -- --locked
 ```
 
 For the full pre-audit gate:
@@ -44,7 +44,8 @@ See `docs/AUDIT_PACKAGE.md` for the required external-review package, launch pre
 
 ## Status
 
-**Not mainnet-public-funds ready** (needs re-review / audit / verified builds).
+**Not mainnet-public-funds ready** (verified build passes; independent review,
+governance, final mint/config, production pinning, and launch operations remain).
 
 Adversarial Highs from the last pass are **fixed in source**:
 

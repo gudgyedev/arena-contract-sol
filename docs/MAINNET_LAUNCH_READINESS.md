@@ -8,9 +8,11 @@ Review date: 2026-07-12
 stronger, but the release evidence is not yet complete enough to call it
 mainnet-ready.
 
-The active review worktree is based on commit `2c3eb4c` and contains additional
-uncommitted hardening. A new release commit and hash must be created after the
-full gate passes. Do not deploy or attest `2c3eb4c` as the final candidate.
+The hardened executable source is frozen at commit
+`c5cbc0bba2568bc8820f5d3ffa3ac57321d19638` on
+`codex/mainnet-readiness-hardening`. It has not been pushed or independently
+reviewed. Documentation-only follow-ups do not replace the requirement to tag,
+publish, rebuild, and verify the exact final review commit.
 
 ## Evidence currently passing
 
@@ -29,6 +31,9 @@ full gate passes. Do not deploy or attest `2c3eb4c` as the final candidate.
 - Website now shows an explicit action summary before opening Phantom.
 - Prior devnet manual transactions reconciled deposit, activation, early-exit
   return, burn, and empty final custody state.
+- The current candidate is deployed on devnet at slot `475812420`; its on-chain
+  executable hash exactly matches the reviewed artifact. Loader padding was
+  independently verified as zero-only.
 
 ## New hardening in this review
 
@@ -58,7 +63,8 @@ must warn users not to send tokens directly to either custody address.
 ## Blocking gates
 
 - [x] Deterministic Docker build succeeds and its hash is recorded.
-- [ ] Final hardening is committed and pushed to the public repository.
+- [ ] Final hardening is pushed to the public repository (local source commit
+      exists; publication remains pending).
 - [ ] CI passes on the exact release commit.
 - [ ] Independent Solana-focused reviewer/audit firm reviews the final commit;
       no unresolved critical/high findings remain.

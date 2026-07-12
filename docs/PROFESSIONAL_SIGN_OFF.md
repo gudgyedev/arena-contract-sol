@@ -29,6 +29,7 @@
 | M-02 old state migration | Fixed by v2 state-version rejection; fresh configs required |
 | M-03 real-token surplus | Fixed by `FinalizeRewards` |
 | M-04 finite counters/index | Mitigated; reviewers should inspect accumulator limits |
+| F-01 lock expires before maturity/funding exposure | Fixed by enforcing minimum lock >= activation delay + two epochs |
 
 See `docs/SECURITY_ADVERSARIAL_FINDINGS.md`.
 
@@ -38,10 +39,10 @@ See `docs/SECURITY_ADVERSARIAL_FINDINGS.md`.
 
 ```bash
 cd arena-contract-sol
-NO_DNA=1 cargo test -p arena-lock-v2
-NO_DNA=1 cargo test -p arena-lock-v2 -- --test-threads=1
-NO_DNA=1 cargo clippy -p arena-lock-v2 --all-targets -- -D warnings
-NO_DNA=1 cargo build-sbf --manifest-path programs/arena-lock-v2/Cargo.toml
+NO_DNA=1 cargo test --locked -p arena-lock-v2 -- --test-threads=1
+NO_DNA=1 cargo clippy --locked -p arena-lock-v2 --all-targets --all-features -- -D warnings
+NO_DNA=1 cargo build-sbf --manifest-path programs/arena-lock-v2/Cargo.toml -- --locked
+solana-verify build --library-name arena_lock_v2
 ```
 
 ---

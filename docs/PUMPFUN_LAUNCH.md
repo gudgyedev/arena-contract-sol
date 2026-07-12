@@ -10,10 +10,10 @@ Pump.fun mints are **Token-2022** with **metadata** extensions.
   - Account: `ImmutableOwner`
   - Still rejects transfer hooks, transfer fees, permanent delegate, etc.
 
-**Devnet program id previously used for pump-compatible testing (verify before reuse; deploy a fresh v2 build for final testing):**
+**Current upgradeable devnet test program (never reuse as the mainnet id):**
 
 ```text
-Ac9fhZ2ZC19p7KEXtebhRweaqSEsuguSAXXnFNr1ML75
+At5K4wSgzNawzGGYMzMHNXUxtJ3yjU6gbgbj8MpSBMUz
 ```
 
 ## Order of operations
@@ -24,7 +24,8 @@ Ac9fhZ2ZC19p7KEXtebhRweaqSEsuguSAXXnFNr1ML75
 3) Initialize arena config  → vault + reward pool for that mint
 4) Pin site .env.production → live mode
 5) Cloudflare deploy
-6) Make program immutable   → CONFIRM_FINAL=YES (mainnet when ready)
+6) Transfer upgrade authority to approved governance
+7) Run a low-value soak; consider immutability only after final approval
 ```
 
 ## Mainnet deploy (needs SOL)
@@ -37,7 +38,7 @@ export HELIUS_API_KEY=...
 export RPC_URL="https://mainnet.helius-rpc.com/?api-key=$HELIUS_API_KEY"
 
 cd arena-contract-sol
-NO_DNA=1 cargo build-sbf --manifest-path programs/arena-lock-v2/Cargo.toml
+solana-verify build --library-name arena_lock_v2
 
 # NEW program id for mainnet (do not reuse immutable AV4FTA)
 solana program deploy target/deploy/arena_lock_v2.so \
@@ -46,8 +47,9 @@ solana program deploy target/deploy/arena_lock_v2.so \
   --keypair "$KEYPAIR"
 ```
 
-After soak, freeze **the program id you actually deployed** (never a hardcoded
-devnet default — freezing the wrong id leaves mainnet upgradeable):
+After audit, byte verification, governance approval, and soak, optionally
+freeze **the program id you actually deployed**. This is irreversible; never
+use a hardcoded devnet default:
 
 ```bash
 # PROGRAM_ID must be the pubkey returned by `solana program deploy` on THIS cluster
@@ -55,6 +57,7 @@ CONFIRM_FINAL=YES \
 PROGRAM_ID=<mainnet-or-target-program-id> \
 AUTHORITY_KEYPAIR=$KEYPAIR \
 RPC_URL=$RPC_URL \
+EXPECTED_GIT_COMMIT=$(git rev-parse HEAD) \
   scripts/make-program-immutable.sh
 ```
 
@@ -68,7 +71,7 @@ fixed in source; that is not the same as firm-certified mainnet.
 ```bash
 cd Sites/bullring
 export PUBLIC_TOKEN_MINT=<pump mint>
-export PUBLIC_ARENA_PROGRAM_ID=Ac9fhZ2ZC19p7KEXtebhRweaqSEsuguSAXXnFNr1ML75  # or mainnet id
+export PUBLIC_ARENA_PROGRAM_ID=<fresh-mainnet-program-id>
 export SOLANA_RPC_URL="https://mainnet.helius-rpc.com/?api-key=$HELIUS_API_KEY"
 export PUBLIC_SOLANA_CLUSTER=mainnet-beta
 export PUBLIC_ARENA_MIN_DEPOSIT_AMOUNT=1  # token units, converted to raw units by the script
