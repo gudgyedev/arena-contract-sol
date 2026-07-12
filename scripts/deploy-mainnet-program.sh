@@ -40,6 +40,9 @@ PROGRAM_ID="$($SOLANA_KEYGEN_BIN pubkey "$PROGRAM_KEYPAIR")"
 BALANCE="$($SOLANA_BIN balance "$AUTHORITY" --url "$RPC_URL")"
 ARTIFACT_BYTES="$(wc -c <"$SO_PATH" | tr -d ' ')"
 ARTIFACT_HASH="$(sha256sum "$SO_PATH" | awk '{print $1}')"
+PROGRAMDATA_RENT="$($SOLANA_BIN rent "$((ARTIFACT_BYTES + 45))" --url "$RPC_URL")"
+BUFFER_RENT="$($SOLANA_BIN rent "$((ARTIFACT_BYTES + 37))" --url "$RPC_URL")"
+PROGRAM_ACCOUNT_RENT="$($SOLANA_BIN rent 36 --url "$RPC_URL")"
 
 if $SOLANA_BIN program show "$PROGRAM_ID" --url "$RPC_URL" >/dev/null 2>&1; then
   echo "Program address already exists on mainnet: $PROGRAM_ID" >&2
@@ -56,6 +59,10 @@ echo "artifact-sha256=$ARTIFACT_HASH"
 echo "authority=$AUTHORITY"
 echo "authority-balance=$BALANCE"
 echo "fresh-program-id=$PROGRAM_ID"
+echo "programdata-$PROGRAMDATA_RENT"
+echo "temporary-buffer-$BUFFER_RENT (normally reclaimed after successful deploy)"
+echo "program-account-$PROGRAM_ACCOUNT_RENT"
+echo "transaction fees are additional"
 echo "upgradeable=yes (immutability is a separate explicit transaction)"
 echo
 
