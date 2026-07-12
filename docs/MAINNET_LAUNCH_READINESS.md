@@ -17,8 +17,9 @@ upgrade-authority decision necessarily happen at launch time.
 
 The hardened executable source is frozen at commit
 `c5cbc0bba2568bc8820f5d3ffa3ac57321d19638` on
-`codex/mainnet-readiness-hardening`. Publication, CI, tagging, and a rebuild of
-the exact final release commit remain mechanical release gates.
+`codex/mainnet-readiness-hardening`. It is published on
+`BurgessTG/arena-contract-sol` main and proposed upstream in
+`gudgyedev/arena-contract-sol#1`.
 
 ## Evidence currently passing
 
@@ -69,9 +70,9 @@ must warn users not to send tokens directly to either custody address.
 ## Release gates
 
 - [x] Deterministic Docker build succeeds and its hash is recorded.
-- [ ] Final hardening is pushed to the public repository (local source commit
-      exists; publication remains pending).
-- [ ] CI passes on the exact release commit.
+- [x] Final hardening is pushed to a public repository and proposed upstream.
+- [x] GitHub CI passes on the exact published contract source and release
+      branch (format, 6 unit + 24 ProgramTest tests, and strict clippy).
 - [x] External audit is not a launch gate by explicit owner decision. The
       release must always be described publicly as unaudited.
 - [ ] Final token mint exists and mint/freeze authorities are revoked.
