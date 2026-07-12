@@ -24,8 +24,8 @@ At5K4wSgzNawzGGYMzMHNXUxtJ3yjU6gbgbj8MpSBMUz
 3) Initialize arena config  → vault + reward pool for that mint
 4) Pin site .env.production → live mode
 5) Cloudflare deploy
-6) Transfer upgrade authority to approved governance
-7) Run a low-value soak; consider immutability only after final approval
+6) Run a low-value smoke and verify exact production bindings
+7) Make immutable, or document a temporary upgrade authority and removal date
 ```
 
 ## Mainnet deploy (needs SOL)
@@ -40,14 +40,30 @@ export RPC_URL="https://mainnet.helius-rpc.com/?api-key=$HELIUS_API_KEY"
 cd arena-contract-sol
 solana-verify build --library-name arena_lock_v2
 
-# NEW program id for mainnet (do not reuse immutable AV4FTA)
-solana program deploy target/deploy/arena_lock_v2.so \
-  --program-id target/deploy/arena_lock_v2-pump-keypair.json \
-  --url "$RPC_URL" \
-  --keypair "$KEYPAIR"
+# Generate a fresh ignored mainnet program keypair once. Back it up securely;
+# publish only its public address.
+mkdir -p target/mainnet
+solana-keygen new --no-bip39-passphrase --silent \
+  --outfile target/mainnet/arena-lock-v2-program-keypair.json
+
+# Inspection-only first. This refuses a dirty/wrong commit, non-mainnet RPC,
+# reused program address, missing artifact, or mismatched key files.
+RPC_URL="$RPC_URL" \
+AUTHORITY_KEYPAIR="$KEYPAIR" \
+PROGRAM_KEYPAIR=target/mainnet/arena-lock-v2-program-keypair.json \
+EXPECTED_GIT_COMMIT=$(git rev-parse HEAD) \
+  scripts/deploy-mainnet-program.sh
+
+# Only after reviewing the exact printed summary and explicit approval:
+CONFIRM_MAINNET_DEPLOY=YES \
+RPC_URL="$RPC_URL" \
+AUTHORITY_KEYPAIR="$KEYPAIR" \
+PROGRAM_KEYPAIR=target/mainnet/arena-lock-v2-program-keypair.json \
+EXPECTED_GIT_COMMIT=$(git rev-parse HEAD) \
+  scripts/deploy-mainnet-program.sh
 ```
 
-After audit, byte verification, governance approval, and soak, optionally
+After exact-byte verification and a successful production smoke, optionally
 freeze **the program id you actually deployed**. This is irreversible; never
 use a hardcoded devnet default:
 
@@ -61,10 +77,11 @@ EXPECTED_GIT_COMMIT=$(git rev-parse HEAD) \
   scripts/make-program-immutable.sh
 ```
 
-**Stop before mainnet:** re-run adversarial review on this commit, prefer formal
-audit + verified builds, then deploy under multisig/timelock. See
-`docs/SECURITY_ADVERSARIAL_FINDINGS.md`. Engineering Highs H-01/H-02/H-03 are
-fixed in source; that is not the same as firm-certified mainnet.
+**Unaudited self-launch:** the owner explicitly waived an external audit. Re-run
+the automated/adversarial gate on the exact release commit and verify deployed
+bytes. See `docs/SECURITY_ADVERSARIAL_FINDINGS.md`. Engineering Highs
+H-01/H-02/H-03 are fixed in source; that is not firm certification or a safety
+guarantee.
 
 ## After you have the pump mint
 
@@ -75,10 +92,11 @@ export PUBLIC_ARENA_PROGRAM_ID=<fresh-mainnet-program-id>
 export SOLANA_RPC_URL="https://mainnet.helius-rpc.com/?api-key=$HELIUS_API_KEY"
 export PUBLIC_SOLANA_CLUSTER=mainnet-beta
 export PUBLIC_ARENA_MIN_DEPOSIT_AMOUNT=1  # token units, converted to raw units by the script
-export DEVNET_PAYER_KEYPAIR=...
+export ARENA_AUTHORITY_KEYPAIR=...
 
-bun scripts/post-pump-launch.mjs
-# → writes production-pin.env
+bun scripts/post-pump-launch.mjs # inspection only
+CONFIRM_MAINNET_INITIALIZE=YES bun scripts/post-pump-launch.mjs
+# → after confirmation, writes production-pin.env
 # merge into .env.production, then:
 bun run deploy:cloudflare
 ```

@@ -4,15 +4,21 @@ Review date: 2026-07-12
 
 ## Current verdict
 
-**NO-GO for public mainnet funds.** The engineering candidate is materially
-stronger, but the release evidence is not yet complete enough to call it
-mainnet-ready.
+**ENGINEERING SIGN-OFF: unaudited self-launch release candidate.** The owner has
+explicitly decided not to obtain an external audit and accepts that residual
+smart-contract, economic, operational, market, key-custody, and legal risk
+remains. This is not an audit opinion, a security guarantee, or a statement that
+public funds cannot be lost.
+
+The reviewed contract is ready to advance through the controlled mainnet launch
+sequence below. It is not yet live: the final Pump.fun mint, fresh mainnet
+program/config, production site binding, mainnet smoke transaction, and final
+upgrade-authority decision necessarily happen at launch time.
 
 The hardened executable source is frozen at commit
 `c5cbc0bba2568bc8820f5d3ffa3ac57321d19638` on
-`codex/mainnet-readiness-hardening`. It has not been pushed or independently
-reviewed. Documentation-only follow-ups do not replace the requirement to tag,
-publish, rebuild, and verify the exact final review commit.
+`codex/mainnet-readiness-hardening`. Publication, CI, tagging, and a rebuild of
+the exact final release commit remain mechanical release gates.
 
 ## Evidence currently passing
 
@@ -60,39 +66,45 @@ not credited to any position and is intentionally not recoverable by an admin.
 The site must only use the program instructions, and published documentation
 must warn users not to send tokens directly to either custody address.
 
-## Blocking gates
+## Release gates
 
 - [x] Deterministic Docker build succeeds and its hash is recorded.
 - [ ] Final hardening is pushed to the public repository (local source commit
       exists; publication remains pending).
 - [ ] CI passes on the exact release commit.
-- [ ] Independent Solana-focused reviewer/audit firm reviews the final commit;
-      no unresolved critical/high findings remain.
+- [x] External audit is not a launch gate by explicit owner decision. The
+      release must always be described publicly as unaudited.
 - [ ] Final token mint exists and mint/freeze authorities are revoked.
 - [ ] Fresh mainnet program is deployed from the verified release artifact.
 - [ ] Mainnet config uses the approved policy and fresh PDA/custody accounts.
 - [ ] Vault/reward accounts are independently verified for mint, owner,
       delegate, close authority, frozen/native state, and Token-2022 extensions.
-- [ ] Upgrade authority is transferred to the approved multisig/timelock, with
-      signers and recovery policy documented. Immutability is considered only
-      after audit, deploy verification, and a public soak window.
+- [ ] After deploy/config/site verification, explicitly choose either immediate
+      immutability or a documented temporary upgrade authority. Immutability is
+      irreversible; keeping a hot authority preserves upgrade/key-compromise
+      risk.
 - [ ] Production site is pinned to the exact mainnet program/config/mint and
       passes manual Phantom deposit, activate, roll, fund, claim, early-exit,
       mature-exit, and failure-path testing.
 - [ ] Monitoring, incident communications, RPC failover, and treasury funding
       procedures are documented and exercised.
-- [ ] Legal review covers the token launch, staking language, penalty
-      redistribution, and jurisdiction-specific risks.
+- [x] Legal review is owner-waived as a technical launch gate. No legal opinion
+      is provided; jurisdiction, disclosures, and launch compliance remain the
+      owner's responsibility.
 
 ## Required release order
 
 1. Finish engineering hardening and deterministic verification.
-2. Commit/publish one frozen candidate and obtain external review.
-3. Fix findings, repeat verification, and freeze a new commit if necessary.
-4. Create the final mint and revoke mint/freeze authorities.
-5. Deploy a fresh mainnet program from the verified SBF.
+2. Commit/publish one frozen candidate; require green CI on that exact commit.
+3. Rebuild the exact release commit and confirm the recorded artifact hashes.
+4. Deploy the fresh mainnet program only after the explicit transaction review.
+5. Launch the final mint; inspect its program, extensions, decimals, supply, and
+   mint/freeze authorities before binding it to the arena.
 6. Initialize one fresh Bullring config and verify every bound account.
-7. Transfer upgrade authority to the approved governance setup.
-8. Pin and deploy the production site, then perform manual wallet testing.
-9. Run a public low-value soak before accepting unrestricted public value.
-10. Consider immutability only when all prior evidence is final.
+7. Pin/deploy the production site and perform a low-value manual wallet smoke.
+8. Explicitly make the program immutable or document the temporary upgrade
+   authority and its removal deadline.
+9. Open unrestricted use only after the exact production binding is verified.
+
+See `docs/SELF_LAUNCH_SIGNOFF.md` for the owner decision and the final click
+sequence.

@@ -34,18 +34,22 @@ NO_DNA=1 cargo clippy --locked -p arena-lock-v2 --all-targets --all-features -- 
 NO_DNA=1 cargo build-sbf --manifest-path programs/arena-lock-v2/Cargo.toml -- --locked
 ```
 
-For the full pre-audit gate:
+For the full release-candidate gate:
 
 ```bash
 scripts/readiness-check.sh
 ```
 
-See `docs/AUDIT_PACKAGE.md` for the required external-review package, launch preconditions, and acceptance bar.
+See `docs/MAINNET_LAUNCH_READINESS.md` for the evidence, owner-accepted risks,
+launch preconditions, and acceptance bar. `docs/AUDIT_PACKAGE.md` remains
+available if an independent review is commissioned later.
 
 ## Status
 
-**Not mainnet-public-funds ready** (verified build passes; independent review,
-governance, final mint/config, production pinning, and launch operations remain).
+**Unaudited self-launch release candidate.** Engineering verification passes.
+This repository does not claim an independent audit. Mainnet deployment, final
+mint/config binding, production pinning, smoke testing, and the explicit
+upgrade-authority decision remain launch-time gates.
 
 Adversarial Highs from the last pass are **fixed in source**:
 
@@ -56,7 +60,8 @@ Adversarial Highs from the last pass are **fixed in source**:
 | H-03 | Split early-exit penalty bypass | Fixed |
 | M-04 / M-05 | Dust / counter DoS | Fixed / mitigated |
 
-See `docs/SECURITY_ADVERSARIAL_FINDINGS.md`. Prior “10/10 RC” claim remains **retracted**.
+See `docs/SECURITY_ADVERSARIAL_FINDINGS.md`. “Release candidate” describes the
+tested engineering state; it is not a guarantee of safety or an audit opinion.
 
 **Product note:** after `ActivatePosition`, stake is **warming** until the next
 epoch roll plus a position touch; only then is it mature for funding/rewards.
