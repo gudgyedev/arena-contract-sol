@@ -6,6 +6,9 @@ resolver = "2"
 
 [workspace.dependencies]
 borsh = { version = "1.5.7", features = ["derive"] }
+# 1.8.5 pulls Rust-1.85-only digest crates despite the Solana 2.3
+# verifiable-build container using Cargo 1.84.
+blake3 = { version = "=1.8.2", default-features = false }
 solana-program = "2.2.3"
 solana-program-test = "2.2.3"
 solana-sdk = "2.2.3"

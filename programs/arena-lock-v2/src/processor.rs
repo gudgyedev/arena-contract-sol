@@ -155,6 +155,28 @@ fn assert_uninitialized(account: &AccountInfo) -> ProgramResult {
     Ok(())
 }
 
+/// Fairness gate: even when activation happens at the start of an epoch, a
+/// position must remain under the early-exit policy for one complete epoch
+/// after it can first mature. This prevents a short lock from expiring during
+/// warming and turning scheduled funding into a penalty-free timing trade.
+fn assert_lock_policy(
+    min_lock_seconds: i64,
+    activation_delay_seconds: i64,
+    epoch_seconds: i64,
+) -> ProgramResult {
+    if min_lock_seconds <= 0 || activation_delay_seconds <= 0 || epoch_seconds <= 0 {
+        return Err(ArenaError::InvalidAmount.into());
+    }
+    let minimum_lock = epoch_seconds
+        .checked_mul(2)
+        .and_then(|epochs| activation_delay_seconds.checked_add(epochs))
+        .ok_or(ArenaError::MathOverflow)?;
+    if min_lock_seconds < minimum_lock {
+        return Err(ArenaError::InvalidLockPolicy.into());
+    }
+    Ok(())
+}
+
 fn create_program_account<'a>(
     payer: &AccountInfo<'a>,
     new_account: &AccountInfo<'a>,
@@ -584,11 +606,8 @@ fn process_initialize_config(
     burn_penalty_bps: u16,
     decimals: u8,
 ) -> ProgramResult {
-    if min_lock_seconds <= 0
-        || activation_delay_seconds <= 0
-        || epoch_seconds <= 0
-        || min_deposit_amount == 0
-    {
+    assert_lock_policy(min_lock_seconds, activation_delay_seconds, epoch_seconds)?;
+    if min_deposit_amount == 0 {
         return Err(ArenaError::InvalidAmount.into());
     }
     if early_exit_penalty_bps > MAX_ARENA_EARLY_EXIT_PENALTY_BPS {
@@ -1745,7 +1764,48 @@ fn process_withdraw(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) 
 
 #[cfg(test)]
 mod unit_tests {
-    use super::penalty_split;
+    use super::{
+        assert_allowed_account_extensions, assert_allowed_mint_extensions, assert_lock_policy,
+        penalty_split,
+    };
+    use spl_token_2022::extension::ExtensionType;
+
+    #[test]
+    fn token_2022_extension_allowlist_is_fail_closed() {
+        assert!(assert_allowed_mint_extensions(&[
+            ExtensionType::MetadataPointer,
+            ExtensionType::TokenMetadata,
+        ])
+        .is_ok());
+        assert!(assert_allowed_account_extensions(&[ExtensionType::ImmutableOwner]).is_ok());
+
+        for extension in [
+            ExtensionType::TransferFeeConfig,
+            ExtensionType::TransferHook,
+            ExtensionType::PermanentDelegate,
+            ExtensionType::MintCloseAuthority,
+            ExtensionType::ConfidentialTransferMint,
+        ] {
+            assert!(assert_allowed_mint_extensions(&[extension]).is_err());
+        }
+        for extension in [
+            ExtensionType::TransferHookAccount,
+            ExtensionType::MemoTransfer,
+            ExtensionType::CpiGuard,
+            ExtensionType::ConfidentialTransferAccount,
+        ] {
+            assert!(assert_allowed_account_extensions(&[extension]).is_err());
+        }
+    }
+
+    #[test]
+    fn lock_policy_keeps_stake_exposed_for_one_epoch_after_maturity() {
+        assert!(assert_lock_policy(21, 1, 10).is_ok());
+        assert!(assert_lock_policy(20, 1, 10).is_err());
+        assert!(assert_lock_policy(600, 2, 259_200).is_err());
+        assert!(assert_lock_policy(518_402, 2, 259_200).is_ok());
+        assert!(assert_lock_policy(i64::MAX, 1, i64::MAX).is_err());
+    }
 
     #[test]
     fn cumulative_penalty_matches_bulk_for_fifty_percent() {

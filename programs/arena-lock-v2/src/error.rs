@@ -47,6 +47,8 @@ pub enum ArenaError {
     UnsupportedStateVersion,
     #[error("Funding snapshot mismatch")]
     FundingSnapshotMismatch,
+    #[error("Minimum lock must cover activation plus two full epochs")]
+    InvalidLockPolicy,
 }
 
 impl From<ArenaError> for ProgramError {

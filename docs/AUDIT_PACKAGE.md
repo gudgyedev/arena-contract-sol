@@ -26,6 +26,9 @@ This document defines what must be sent to an external reviewer before Bullring 
 
 - The staking mint must have mint authority revoked before `InitializeConfig`.
 - The staking mint must have freeze authority revoked before `InitializeConfig`.
+- Minimum lock must cover activation delay plus two full epochs. This leaves at
+  least one complete penalty-bearing epoch after worst-case maturity and blocks
+  penalty-free funding-window timing.
 - Custody token accounts must be owned by the arena vault-authority PDA.
 - Custody token accounts must not be frozen, native, delegated, or close-authority controlled.
 - Token-2022 mint extensions are limited to `MetadataPointer` and `TokenMetadata`.
@@ -50,6 +53,8 @@ This document defines what must be sent to an external reviewer before Bullring 
   - `total_locked == eligible_locked + warming_locked + pending_activation_locked` after each successful stake movement.
   - Position locked amount equals eligible plus warming plus pending activation amount.
   - Funding commits exactly one indexed batch against the mature eligible snapshot.
+  - Across all positions, funded rewards are conserved as claimed tokens plus
+    actual finalizable reward-pool surplus; churn must never over-allocate.
   - `reward_dust` remains zero in v2; final surplus burns use actual token-account balance.
   - Full exit leaves `pending_rewards == 0` on the position.
   - Early-exit penalty plus returned principal equals withdrawn amount.

@@ -14,11 +14,32 @@ evidence for another review pass, not an audit-firm opinion.
 | M-02 | High operational - no safe migration for old state | Fixed by v2 version rejection; use fresh configs |
 | M-03 | Medium - permanent real-token surplus | Fixed by explicit finalization from actual pool balance |
 | M-04 | Medium - finite telemetry/index blockers | Mitigated |
+| F-01 | High economic - lock expires before maturity/funding exposure | Fixed |
 | Low | Funder slippage, empty-roll cadence, claim sync rollback | Mitigated |
 
 The correct release status remains: ready for re-review, not ready for
 mainnet public funds or immutability without external review, verified build
 evidence, and final deployment governance.
+
+## F-01 - Lock / Epoch Timing Mismatch - Fixed
+
+Old risk: a configuration could use a minimum lock shorter than its warming
+period. With the proposed 10-minute lock and 3-day epoch, stake could mature
+after its early-exit window had already expired, time a scheduled funding
+window, and leave without penalty.
+
+Fix:
+
+- `InitializeConfig` now requires
+  `min_lock_seconds >= activation_delay_seconds + 2 * epoch_seconds`.
+- This guarantees one full penalty-bearing epoch after worst-case maturity.
+- The proposed Bullring launch values are a 7-day minimum lock, 2-second
+  activation delay, and 3-day epoch.
+
+Evidence:
+
+- `lock_policy_keeps_stake_exposed_for_one_epoch_after_maturity`
+- `multi_user_reward_conservation_across_churn`
 
 ## H-01 - Pre-Armed Warming Sniping - Fixed
 
