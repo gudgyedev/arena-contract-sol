@@ -25,6 +25,16 @@ Current devnet program id:
 At5K4wSgzNawzGGYMzMHNXUxtJ3yjU6gbgbj8MpSBMUz
 ```
 
+Current mainnet-beta program id (upgradeable during the controlled test phase):
+
+```text
+DACFfLpaVw2Q7dz4mEUVBFzR7VjjTxMJT71AFBDLJmwU
+```
+
+Its deployed executable exactly matches the reviewed artifact at release commit
+`55eb89f2757962bf5b91f619676dbf46c811069e`. See
+`docs/MAINNET_DEPLOYMENT.md` for the transaction and byte-verification record.
+
 ## Build And Test
 
 ```bash
@@ -47,9 +57,10 @@ available if an independent review is commissioned later.
 ## Status
 
 **Unaudited self-launch release candidate.** Engineering verification passes.
-This repository does not claim an independent audit. Mainnet deployment, final
-mint/config binding, production pinning, smoke testing, and the explicit
-upgrade-authority decision remain launch-time gates.
+This repository does not claim an independent audit. The generic mainnet
+program is deployed and byte-verified; final mint/config binding, production
+pinning, smoke testing, and the explicit upgrade-authority decision remain
+launch-time gates.
 
 Adversarial Highs from the last pass are **fixed in source**:
 

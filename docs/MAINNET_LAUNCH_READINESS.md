@@ -41,6 +41,10 @@ The hardened executable source is frozen at commit
 - The current candidate is deployed on devnet at slot `475812420`; its on-chain
   executable hash exactly matches the reviewed artifact. Loader padding was
   independently verified as zero-only.
+- The same reviewed artifact is deployed on mainnet-beta as
+  `DACFfLpaVw2Q7dz4mEUVBFzR7VjjTxMJT71AFBDLJmwU` at slot `432549714`.
+  Mainnet dump length is 181,824 bytes and SHA-256 exactly matches
+  `67718f595b6558f4f598132911afc839c9f4023e43d3c21d2f9cd75103ae0629`.
 
 ## New hardening in this review
 
@@ -76,7 +80,8 @@ must warn users not to send tokens directly to either custody address.
 - [x] External audit is not a launch gate by explicit owner decision. The
       release must always be described publicly as unaudited.
 - [ ] Final token mint exists and mint/freeze authorities are revoked.
-- [ ] Fresh mainnet program is deployed from the verified release artifact.
+- [x] Fresh mainnet program is deployed from the verified release artifact and
+      independently dumped back with an exact byte/hash match.
 - [ ] Mainnet config uses the approved policy and fresh PDA/custody accounts.
 - [ ] Vault/reward accounts are independently verified for mint, owner,
       delegate, close authority, frozen/native state, and Token-2022 extensions.
