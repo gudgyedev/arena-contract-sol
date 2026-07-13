@@ -3,6 +3,10 @@
 *.ll
 .xray/
 **/*.rs.bk
+.DS_Store
+**/.DS_Store
+.syncthing.*.tmp
+**/.syncthing.*.tmp
 .env
 .env.*
 *-keypair.json

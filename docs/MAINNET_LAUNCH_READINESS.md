@@ -11,15 +11,16 @@ remains. This is not an audit opinion, a security guarantee, or a statement that
 public funds cannot be lost.
 
 The reviewed contract is ready to advance through the controlled mainnet launch
-sequence below. It is not yet live: the final Pump.fun mint, fresh mainnet
-program/config, production site binding, mainnet smoke transaction, and final
-upgrade-authority decision necessarily happen at launch time.
+sequence below. The generic program is deployed and byte-verified but is not
+yet open for unrestricted use: the final Pump.fun mint, fresh official config,
+production site binding, mainnet smoke transaction, and final upgrade-authority
+decision necessarily happen at launch time.
 
-The hardened executable source is frozen at commit
-`c5cbc0bba2568bc8820f5d3ffa3ac57321d19638` on
-`codex/mainnet-readiness-hardening`. It is published on
-`BurgessTG/arena-contract-sol` main and proposed upstream in
-`gudgyedev/arena-contract-sol#1`.
+The deployed mainnet release is recorded at commit
+`55eb89f2757962bf5b91f619676dbf46c811069e` on
+`codex/mainnet-readiness-hardening`. Its executable source has been frozen since
+`c5cbc0bba2568bc8820f5d3ffa3ac57321d19638`; the intervening release commits do
+not change the program source.
 
 ## Evidence currently passing
 
